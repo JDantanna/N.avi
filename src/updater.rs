@@ -11,8 +11,9 @@
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-/// Repositório "usuario/nome" que publica as releases. Troque pelo seu.
-const REPO: &str = "JDantanna/DES_ATENTO";
+/// Repositório "usuario/nome" que publica as releases. O nome antigo (`JDantanna/DES_ATENTO`) segue funcionando:
+/// o GitHub responde 301 para este, e os redirecionamentos são seguidos.
+const REPO: &str = "JDantanna/N.avi";
 const ASSET: &str = "Navi_Setup.exe";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Um instalador menor que isto veio quebrado (uma página de erro, um download cortado).
@@ -208,12 +209,13 @@ mod tests {
 
     #[test]
     fn le_a_versao_do_redirecionamento() {
-        let tag = "https://github.com/JDantanna/DES_ATENTO/releases/tag";
+        let tag = "https://github.com/JDantanna/N.avi/releases/tag";
         assert_eq!(parse_location(&format!("{tag}/v0.9.7")), version("0.9.7"));
         assert_eq!(parse_location(&format!("{tag}/0.9.7")), version("0.9.7"), "sem o v");
         assert_eq!(parse_location(&format!("{tag}/V1.10.0")), version("1.10.0"), "v maiúsculo");
         assert_eq!(parse_location(&format!("{tag}/v0.9.7/")), version("0.9.7"), "barra no fim");
-        assert_eq!(parse_location("/JDantanna/DES_ATENTO/releases/tag/v0.9.7"), version("0.9.7"), "só o caminho");
+        assert_eq!(parse_location("/JDantanna/N.avi/releases/tag/v0.9.7"), version("0.9.7"), "só o caminho");
+        assert_eq!(parse_location("https://github.com/JDantanna/DES_ATENTO/releases/tag/v0.9.7"), version("0.9.7"), "endereço antigo");
         assert_eq!(parse_location(&format!("  {tag}/v0.9.7?x=1 ")), version("0.9.7"), "espaço e consulta");
     }
 
@@ -222,25 +224,25 @@ mod tests {
         for bad in [
             "",
             "https://github.com/login",
-            "https://github.com/JDantanna/DES_ATENTO",
-            "https://github.com/JDantanna/DES_ATENTO/releases/tag/",
-            "https://github.com/JDantanna/DES_ATENTO/releases/tag/v",
-            "https://github.com/JDantanna/DES_ATENTO/releases/tag/nightly",
-            "https://github.com/JDantanna/DES_ATENTO/releases/tag/v0.9.",
-            "https://github.com/JDantanna/DES_ATENTO/releases/tag/v0..9",
-            "https://github.com/JDantanna/DES_ATENTO/releases/tag/v0.9.7-beta",
+            "https://github.com/JDantanna/N.avi",
+            "https://github.com/JDantanna/N.avi/releases/tag/",
+            "https://github.com/JDantanna/N.avi/releases/tag/v",
+            "https://github.com/JDantanna/N.avi/releases/tag/nightly",
+            "https://github.com/JDantanna/N.avi/releases/tag/v0.9.",
+            "https://github.com/JDantanna/N.avi/releases/tag/v0..9",
+            "https://github.com/JDantanna/N.avi/releases/tag/v0.9.7-beta",
         ] {
             assert_eq!(parse_location(bad), Latest::Unexpected, "{bad:?}");
         }
         // Sem nenhuma release, o GitHub manda para a lista.
-        assert_eq!(parse_location("https://github.com/JDantanna/DES_ATENTO/releases"), Latest::NoRelease);
+        assert_eq!(parse_location("https://github.com/JDantanna/N.avi/releases"), Latest::NoRelease);
     }
 
     #[test]
     fn le_os_cabecalhos_do_curl() {
-        let ok = "HTTP/2 302 \r\nserver: GitHub.com\r\nLocation: https://github.com/JDantanna/DES_ATENTO/releases/tag/v0.9.7\r\n\r\n";
+        let ok = "HTTP/2 302 \r\nserver: GitHub.com\r\nLocation: https://github.com/JDantanna/N.avi/releases/tag/v0.9.7\r\n\r\n";
         assert_eq!(parse_headers(ok), Ok(version("0.9.7")));
-        let lower = "HTTP/1.1 302 Found\nlocation: /JDantanna/DES_ATENTO/releases/tag/v0.9.7\n";
+        let lower = "HTTP/1.1 302 Found\nlocation: /JDantanna/N.avi/releases/tag/v0.9.7\n";
         assert_eq!(parse_headers(lower), Ok(version("0.9.7")), "nome do cabeçalho em minúsculas");
         // Sem Location, ou com um código que não é de redirecionamento, é "resposta inesperada", não "sem release".
         assert!(parse_headers("HTTP/2 200 \r\n\r\n").unwrap_err().contains("200"));
@@ -262,8 +264,27 @@ mod tests {
         // O mesmo com os caminhos relativos, com `HTTP/1.1` e com o 200 da tag ausente.
         let relative = "HTTP/1.1 301 Moved Permanently\nLocation: /JDantanna/N.avi/releases/latest\n\nHTTP/1.1 302 Found\nLocation: /JDantanna/N.avi/releases/tag/v1.0.0\n\n";
         assert_eq!(parse_headers(relative), Ok(version("1.0.0")));
+        // Pelo endereço antigo (DES_ATENTO): 301 para o repositório novo, 302 para a tag, 200 da página da tag.
+        let old = "HTTP/2 301 
+location: https://github.com/JDantanna/N.avi/releases/latest
+
+                   HTTP/2 302 
+location: https://github.com/JDantanna/N.avi/releases/tag/v0.9.8
+
+                   HTTP/2 200 
+
+";
+        assert_eq!(parse_headers(old), Ok(version("0.9.8")));
+        // Uma tag que ainda aponta para o nome antigo também vale.
+        let legacy_tag = "HTTP/2 302 
+location: https://github.com/JDantanna/DES_ATENTO/releases/tag/v0.9.7
+
+HTTP/2 200 
+
+";
+        assert_eq!(parse_headers(legacy_tag), Ok(version("0.9.7")));
         // Sem renomear: um só redirecionamento, e a tag em seguida.
-        let plain = "HTTP/2 302 \r\nlocation: https://github.com/JDantanna/DES_ATENTO/releases/tag/v0.9.7\r\n\r\nHTTP/2 200 \r\n\r\n";
+        let plain = "HTTP/2 302 \r\nlocation: https://github.com/JDantanna/N.avi/releases/tag/v0.9.7\r\n\r\nHTTP/2 200 \r\n\r\n";
         assert_eq!(parse_headers(plain), Ok(version("0.9.7")));
         // A cadeia corta no meio (limite de redirecionamentos): o último Location ainda não é a tag.
         let cut = "HTTP/2 301 \r\nlocation: https://github.com/JDantanna/N.avi/releases/latest\r\n\r\n";
