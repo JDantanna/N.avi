@@ -7,6 +7,7 @@ use eframe::egui::{self, Align2, Color32, FontId, Sense, Stroke, vec2};
 
 mod widget;
 
+use crate::brand::{self, PANEL_TITLE, WIDGET_TITLE};
 use crate::theme::{self, ACCENT, BG};
 use crate::tracker::{AppRow, Icon, Tracker};
 use crate::chrome;
@@ -30,7 +31,6 @@ impl Range {
 }
 
 const WIDGET_ID: &str = "monitor_widget";
-const WIDGET_TITLE: &str = "Navi · Monitoramento";
 /// Altura do formato médio com a lista de programas da sessão aberta.
 const LIST_H: f32 = 400.0;
 /// Menor tamanho que a janela do widget aceita (cada formato esconde o que não cabe).
@@ -45,8 +45,6 @@ pub fn format_size(format: WidgetFormat) -> egui::Vec2 {
         WidgetFormat::Grande => vec2(460.0, 340.0),
     }
 }
-/// Nome com que o próprio app aparece no rastreador.
-const APP_NAME: &str = "Navi";
 
 pub struct MonitorView {
     range: Range,
@@ -161,7 +159,6 @@ fn save_colors(colors: &AppColors) {
     }
 }
 
-const PANEL_TITLE: &str = "Navi · Programa";
 const PANEL_W: f32 = 340.0;
 /// Largura que o título do painel tem para escrever o nome (o painel menos as margens e o botão de fechar).
 const PANEL_TITLE_W: f32 = PANEL_W - 28.0 - 36.0 - 14.0;
@@ -196,7 +193,7 @@ impl Panel {
     }
 
     fn editable(&self) -> bool {
-        !self.name.is_empty() && self.name != APP_NAME
+        !self.name.is_empty() && !brand::is_own_name(&self.name)
     }
 
     fn height(&self) -> f32 {

@@ -16,13 +16,13 @@ const GRACE_MIN: i64 = 3;
 /// Hora do aviso do dia anterior para tarefas sem hora marcada.
 const DAY_BEFORE_HOUR: u32 = 9;
 
-/// Identidade do app nas notificações: registra um AppUserModelID próprio ("Navi" + ícone),
+/// Identidade do app nas notificações: registra um AppUserModelID próprio ("N.avi" + ícone),
 /// em vez de aparecer como "Windows PowerShell".
 const TOAST: &str = r#"
 $id = 'Navi.App'
 $k = "HKCU:\Software\Classes\AppUserModelId\$id"
 New-Item $k -Force | Out-Null
-New-ItemProperty $k -Name DisplayName -Value 'Navi' -Force | Out-Null
+New-ItemProperty $k -Name DisplayName -Value 'N.avi' -Force | Out-Null
 New-ItemProperty $k -Name IconUri -Value $env:DA_ICON -Force | Out-Null
 $t = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
 $x = $t::GetTemplateContent('ToastImageAndText02')

@@ -4,6 +4,9 @@
 //! A versão mais nova vem do redirecionamento público de `/releases/latest` (o `Location` aponta para
 //! `/releases/tag/vX.Y.Z`), e o instalador é baixado do endereço fixo da release. Nada passa pela API do GitHub
 //! (`api.github.com`), que limita a 60 consultas por hora por IP: esgotada, o botão de atualizar parava de funcionar.
+//!
+//! Os redirecionamentos são seguidos até o fim e vale o `Location` do último: se o repositório for renomeado, o
+//! endereço antigo passa a responder 301 para o novo, que responde 302 para a tag, e tudo continua funcionando.
 
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -68,23 +71,45 @@ fn parse_location(location: &str) -> Latest {
     if path.ends_with("/releases") { Latest::NoRelease } else { Latest::Unexpected }
 }
 
-/// Lê os cabeçalhos da resposta de `/releases/latest` (a primeira linha traz o código HTTP).
+/// Uma resposta da cadeia: o código HTTP e o `Location`, se veio.
+struct Hop {
+    status: u16,
+    location: Option<String>,
+}
+
+/// Separa os cabeçalhos que o `curl -I -L` imprime, uma resposta atrás da outra (cada uma começa com `HTTP/`).
+fn parse_chain(headers: &str) -> Vec<Hop> {
+    let mut hops: Vec<Hop> = Vec::new();
+    for line in headers.lines() {
+        let line = line.trim();
+        if line.get(..5).is_some_and(|start| start.eq_ignore_ascii_case("http/")) {
+            let status = line.split_whitespace().nth(1).and_then(|code| code.parse().ok()).unwrap_or(0);
+            hops.push(Hop { status, location: None });
+        } else if let (Some(hop), Some((name, value))) = (hops.last_mut(), line.split_once(':'))
+            && name.trim().eq_ignore_ascii_case("location")
+        {
+            hop.location = Some(value.trim().to_owned());
+        }
+    }
+    hops
+}
+
+/// Lê os cabeçalhos de `/releases/latest` seguindo os redirecionamentos: vale o `Location` do último que
+/// redirecionou (a tag). Depois dele pode vir a página da tag (200), que não importa.
 fn parse_headers(headers: &str) -> Result<Latest, String> {
-    let status: u16 = headers
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse().ok())
-        .ok_or_else(|| "O GitHub respondeu algo que não entendi. Tente de novo em instantes.".to_owned())?;
-    let location = headers.lines().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        name.trim().eq_ignore_ascii_case("location").then(|| value.trim().to_owned())
-    });
-    match (status, location) {
-        (301 | 302 | 303 | 307 | 308, Some(location)) => Ok(parse_location(&location)),
-        (429, _) => Err("O GitHub pediu para esperar um pouco antes de verificar de novo. Tente em alguns minutos.".to_owned()),
-        (500..=599, _) => Err(format!("O GitHub está com problemas agora (erro {status}). Tente mais tarde.")),
-        _ => Err(format!("O GitHub respondeu algo inesperado (código {status}). Tente de novo em instantes.")),
+    let hops = parse_chain(headers);
+    let Some(last) = hops.last() else {
+        return Err("O GitHub respondeu algo que não entendi. Tente de novo em instantes.".to_owned());
+    };
+    match last.status {
+        429 => return Err("O GitHub pediu para esperar um pouco antes de verificar de novo. Tente em alguns minutos.".to_owned()),
+        500..=599 => return Err(format!("O GitHub está com problemas agora (erro {}). Tente mais tarde.", last.status)),
+        _ => {}
+    }
+    let redirect = hops.iter().rev().find(|hop| (300..400).contains(&hop.status) && hop.location.is_some());
+    match redirect.and_then(|hop| hop.location.as_deref()) {
+        Some(location) => Ok(parse_location(location)),
+        None => Err(format!("O GitHub respondeu algo inesperado (código {}). Tente de novo em instantes.", last.status)),
     }
 }
 
@@ -101,7 +126,8 @@ fn curl_error(code: Option<i32>, doing: &str) -> String {
 
 fn check_blocking() -> Result<State, String> {
     let out = curl()
-        .args(["-sI", "--max-time", "15", "-H", "User-Agent: Navi"])
+        // `-L` segue os redirecionamentos (repositório renomeado) e `-I` imprime os cabeçalhos de cada resposta.
+        .args(["-sIL", "--max-redirs", "5", "--max-time", "15", "-H", "User-Agent: N.avi"])
         .arg(format!("https://github.com/{REPO}/releases/latest"))
         .output()
         .map_err(|e| format!("O curl não está disponível neste Windows: {e}"))?;
@@ -223,6 +249,31 @@ mod tests {
         assert!(parse_headers("HTTP/2 429 \r\n\r\n").unwrap_err().contains("esperar"));
         assert!(parse_headers("").is_err());
         assert!(parse_headers("<html>").is_err());
+    }
+
+    #[test]
+    fn segue_a_cadeia_de_redirecionamentos() {
+        // Repositório renomeado: o endereço antigo responde 301 para o novo, que responde 302 para a tag, e a
+        // página da tag responde 200. Vale o Location do último redirecionamento.
+        let renamed = "HTTP/2 301 \r\nlocation: https://github.com/JDantanna/N.avi/releases/latest\r\nserver: GitHub.com\r\n\r\n\
+                       HTTP/2 302 \r\nlocation: https://github.com/JDantanna/N.avi/releases/tag/v0.9.9\r\n\r\n\
+                       HTTP/2 200 \r\ncontent-type: text/html; charset=utf-8\r\n\r\n";
+        assert_eq!(parse_headers(renamed), Ok(version("0.9.9")));
+        // O mesmo com os caminhos relativos, com `HTTP/1.1` e com o 200 da tag ausente.
+        let relative = "HTTP/1.1 301 Moved Permanently\nLocation: /JDantanna/N.avi/releases/latest\n\nHTTP/1.1 302 Found\nLocation: /JDantanna/N.avi/releases/tag/v1.0.0\n\n";
+        assert_eq!(parse_headers(relative), Ok(version("1.0.0")));
+        // Sem renomear: um só redirecionamento, e a tag em seguida.
+        let plain = "HTTP/2 302 \r\nlocation: https://github.com/JDantanna/DES_ATENTO/releases/tag/v0.9.7\r\n\r\nHTTP/2 200 \r\n\r\n";
+        assert_eq!(parse_headers(plain), Ok(version("0.9.7")));
+        // A cadeia corta no meio (limite de redirecionamentos): o último Location ainda não é a tag.
+        let cut = "HTTP/2 301 \r\nlocation: https://github.com/JDantanna/N.avi/releases/latest\r\n\r\n";
+        assert_eq!(parse_headers(cut), Ok(Latest::Unexpected));
+        // Repositório que ainda não tem release: a cadeia termina na lista de releases.
+        let none = "HTTP/2 302 \r\nlocation: https://github.com/JDantanna/N.avi/releases\r\n\r\nHTTP/2 200 \r\n\r\n";
+        assert_eq!(parse_headers(none), Ok(Latest::NoRelease));
+        // Depois do 301 o GitHub pode pedir para esperar ou falhar: isso vale mais que o Location de antes.
+        assert!(parse_headers("HTTP/2 301 \r\nlocation: /a/b/releases/latest\r\n\r\nHTTP/2 429 \r\n\r\n").unwrap_err().contains("esperar"));
+        assert!(parse_headers("HTTP/2 302 \r\nlocation: /a/b/releases/tag/v1.0.0\r\n\r\nHTTP/2 503 \r\n\r\n").unwrap_err().contains("problemas"));
     }
 
     #[test]

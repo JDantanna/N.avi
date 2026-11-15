@@ -15,6 +15,7 @@ use eframe::egui::{self, Color32, RichText};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
+use crate::brand;
 use crate::model::{Settings, Store, data_dir};
 
 /// Quantos backups diários ficam na pasta.
@@ -29,7 +30,9 @@ const FIRST_CHECK_SECS: f64 = 30.0;
 const WARN_AFTER: u32 = 3;
 const PREFIX: &str = "Navi_backup_";
 const SAFETY_PREFIX: &str = "Navi_antes_de_restaurar_";
-const FOLDER_NAME: &str = "Navi Backup";
+const FOLDER_NAME: &str = "N.avi Backup";
+/// Pasta que as versões antigas sugeriam: quem já a usa continua sendo reconhecido como tendo escolhido o Drive.
+const LEGACY_FOLDER_NAME: &str = "Navi Backup";
 const TASKS: &str = "tasks.json";
 const STAGING: &str = ".restaurar";
 
@@ -148,7 +151,7 @@ pub struct Prepared {
 /// Abre o backup e o extrai para uma pasta à parte, sem tocar nos dados atuais.
 /// Um arquivo que não seja um backup do Navi é recusado aqui.
 pub fn prepare(source: &Path, data: &Path) -> Result<Prepared, String> {
-    let invalid = |e: String| format!("Este arquivo não é um backup válido do Navi ({e}).");
+    let invalid = |e: String| format!("Este arquivo não é um backup válido do {} ({e}).", brand::NAME);
     let mut archive = ZipArchive::new(File::open(source).map_err(|e| invalid(e.to_string()))?).map_err(|e| invalid(e.to_string()))?;
     let staging = data.join(STAGING);
     let _ = std::fs::remove_dir_all(&staging);
@@ -342,7 +345,7 @@ impl Backup {
                 // Backup que falha em silêncio é o pior dos mundos: com o app na bandeja, o aviso precisa sair da janela.
                 if self.failures >= WARN_AFTER && !self.warned {
                     self.warned = true;
-                    crate::notify::toast("O backup do Navi não está funcionando", &e);
+                    crate::notify::toast(&format!("O backup do {} não está funcionando", brand::NAME), &e);
                 }
                 self.error = Some(e);
                 None
@@ -376,7 +379,7 @@ impl Backup {
                     let name = prepared.source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     ui.label(RichText::new("Restaurar este backup?").strong());
                     ui.label(format!("{name}, com {} tarefas.", prepared.tasks));
-                    ui.weak("Os dados de agora serão substituídos, mas antes ganham uma cópia de segurança na mesma pasta. O Navi reinicia sozinho.");
+                    ui.weak(format!("Os dados de agora serão substituídos, mas antes ganham uma cópia de segurança na mesma pasta. O {} reinicia sozinho.", brand::NAME));
                     ui.add_space(6.0);
                     ui.horizontal_wrapped(|ui| {
                         if ui.button("Restaurar e reiniciar").clicked() {
@@ -406,7 +409,7 @@ impl Backup {
                 ui.horizontal_wrapped(|ui| {
                     for (name, path) in &clouds {
                         let target = path.join(FOLDER_NAME);
-                        let current = settings.backup_dir.as_ref() == Some(&target);
+                        let current = settings.backup_dir.as_ref() == Some(&target) || settings.backup_dir.as_ref() == Some(&path.join(LEGACY_FOLDER_NAME));
                         if ui.selectable_label(current, *name).on_hover_text(target.to_string_lossy().into_owned()).clicked() && !current {
                             choose = Some(target);
                         }
@@ -418,7 +421,7 @@ impl Backup {
                     if clouds.is_empty() {
                         ui.weak("Nenhum programa de nuvem encontrado. Instale o Google Drive para computador ou escolha uma pasta sincronizada.");
                     } else {
-                        ui.weak("Uma pasta de nuvem manda o backup para fora deste computador sozinha, sem login no Navi.");
+                        ui.weak(format!("Uma pasta de nuvem manda o backup para fora deste computador sozinha, sem login no {}.", brand::NAME));
                     }
                 }
 
@@ -469,7 +472,7 @@ impl Backup {
             self.error = None;
         }
         if pick_file {
-            let mut dialog = rfd::FileDialog::new().add_filter("Backup do Navi", &["zip"]).set_title("Restaurar um backup");
+            let mut dialog = rfd::FileDialog::new().add_filter(format!("Backup do {}", brand::NAME), &["zip"]).set_title("Restaurar um backup");
             if let Some(dir) = &settings.backup_dir {
                 dialog = dialog.set_directory(dir);
             }

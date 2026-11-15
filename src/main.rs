@@ -3,6 +3,7 @@
 mod appcache;
 mod appname;
 mod backup;
+mod brand;
 #[cfg(test)]
 mod capturas;
 mod chrome;
@@ -172,7 +173,7 @@ impl App {
             // Só na primeira vez: avisa que o Navi continua rodando na bandeja.
             self.settings.tray_notice_shown = true;
             self.settings.save();
-            notify::toast("O Navi continua aberto", "Ele está na bandeja do sistema. Clique no ícone para abrir.");
+            notify::toast(&format!("O {} continua aberto", brand::NAME), "Ele está na bandeja do sistema. Clique no ícone para abrir.");
         }
     }
 
@@ -407,7 +408,7 @@ impl App {
             Cancel,
         }
         let mut choice = None;
-        egui::Window::new("Fechar o Navi")
+        egui::Window::new(format!("Fechar o {}", brand::NAME))
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .collapsible(false)
             .resizable(false)
@@ -474,7 +475,7 @@ impl App {
             ui.horizontal_centered(|ui| {
                 ui.add_space(14.0);
                 Self::logo_ui(ui);
-                ui.add(egui::Label::new(egui::RichText::new("Navi").strong().size(16.0)).selectable(false));
+                ui.add(egui::Label::new(egui::RichText::new(brand::NAME).strong().size(16.0)).selectable(false));
                 ui.add_space(14.0);
                 if inline {
                     self.tabs(ui, false);
@@ -533,7 +534,7 @@ impl App {
         self.sync_scale(&ctx);
         self.sync_min_size(&ctx);
         if !self.frame_fixed {
-            self.frame_fixed = chrome::flatten_window("Navi");
+            self.frame_fixed = chrome::flatten_window(brand::MAIN_TITLE);
         }
         let fade = self.fade(&ctx, ui.scope_id().with("app_fade"));
         ui.set_opacity(fade);
@@ -641,7 +642,7 @@ impl eframe::App for App {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Navi")
+            .with_title(brand::MAIN_TITLE)
             .with_icon(egui::IconData {
                 rgba: include_bytes!("../assets/icon64.rgba").to_vec(),
                 width: 64,
@@ -653,5 +654,5 @@ fn main() -> eframe::Result {
             .with_min_inner_size(MIN_WINDOW),
         ..Default::default()
     };
-    eframe::run_native("Navi", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+    eframe::run_native(brand::NAME, options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
 }

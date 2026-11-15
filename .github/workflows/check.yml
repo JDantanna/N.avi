@@ -75,3 +75,27 @@ jobs:
           git add .
           git -c user.name=ci -c user.email=ci@localhost commit -q -m "Capturas de $env:GITHUB_SHA"
           git push -q --force "https://x-access-token:$env:TOKEN@github.com/$env:GITHUB_REPOSITORY.git" ci-capturas
+
+  # Só compila o script do instalador (com um executável de mentira) para achar erro nele antes de uma release:
+  # o instalador só é gerado quando se cria uma tag, e um erro ali travaria a publicação.
+  instalador:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar o Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: Compilar o script do instalador
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force target/release | Out-Null
+          Set-Content target/release/navi.exe 'executavel de mentira, so para compilar o script'
+          $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw 'Inno Setup 6 nao encontrado' }
+          $out = & $iscc "/DAppVersion=0.0.0" installer\navi.iss *>&1 | ForEach-Object { "$_" }
+          $code = $LASTEXITCODE
+          $out | Select-Object -Last 15
+          if ($code -ne 0) {
+            $out | Select-String -Pattern 'Error|error' | Select-Object -First 6 | ForEach-Object { Write-Output "::error::Instalador: $($_.Line)" }
+          }
+          exit $code

@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use eframe::egui;
+use crate::brand;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows_sys::Win32::Foundation::{HWND, RECT};
@@ -52,7 +53,7 @@ pub struct Tray {
 }
 
 fn main_window() -> HWND {
-    let title: Vec<u16> = "Navi".encode_utf16().chain(Some(0)).collect();
+    let title: Vec<u16> = brand::MAIN_TITLE.encode_utf16().chain(Some(0)).collect();
     unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) }
 }
 
@@ -67,11 +68,11 @@ pub fn enter(ctx: &egui::Context, rgba: &[u8]) -> Option<Tray> {
         return None;
     }
     let menu = Menu::new();
-    menu.append(&MenuItem::with_id(OPEN_ID, "Abrir o Navi", true, None)).ok()?;
+    menu.append(&MenuItem::with_id(OPEN_ID, format!("Abrir o {}", brand::NAME), true, None)).ok()?;
     menu.append(&MenuItem::with_id(QUIT_ID, "Sair", true, None)).ok()?;
     let icon = TrayIconBuilder::new()
         .with_icon(Icon::from_rgba(rgba.to_vec(), 64, 64).ok()?)
-        .with_tooltip("Navi")
+        .with_tooltip(brand::NAME)
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
         .build()

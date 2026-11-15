@@ -5,6 +5,7 @@
 //! ícone (com o nome ao passar o mouse); se cabe, ícone e nome.
 
 use super::*;
+use crate::brand::{self, TASKS_TITLE};
 use crate::model::{Store, Task};
 use crate::tasks::OVERDUE_TEXT;
 
@@ -13,7 +14,6 @@ const PAD: f32 = 10.0;
 const GAP: f32 = 6.0;
 /// Largura de cada botão do widget.
 const BTN_W: f32 = 26.0;
-const TASKS_TITLE: &str = "Navi · Tarefas de hoje";
 /// Espaço entre o widget e a lista de tarefas.
 const TASKS_GAP: f32 = 6.0;
 const TASKS_HEADER_H: f32 = 44.0;
@@ -37,12 +37,12 @@ pub(super) fn fit_text(p: &egui::Painter, text: &str, font: FontId, color: Color
 
 /// O programa tem um ícone próprio para mostrar (o Navi é a fada).
 fn has_icon(name: &str, tex: Option<egui::TextureId>) -> bool {
-    tex.is_some() || name == APP_NAME
+    tex.is_some() || brand::is_own_name(name)
 }
 
 /// Desenha o ícone do programa em `rect`; `letter` põe a inicial do nome no lugar de um ícone que não existe.
 pub(super) fn paint_icon(p: &egui::Painter, rect: egui::Rect, name: &str, tex: Option<egui::TextureId>, letter: bool) {
-    if name == APP_NAME {
+    if brand::is_own_name(name) {
         crate::fairy::draw(p, rect.center(), rect.width() * 1.3, 0.0, 0.3);
     } else if let Some(id) = tex {
         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
@@ -107,6 +107,11 @@ struct Acts {
     toggle_list: bool,
 }
 
+/// Dica do botão de fechar: fechar o widget abre o app.
+fn close_tip() -> String {
+    format!("Fechar o widget e abrir o {}", brand::NAME)
+}
+
 /// Botão de ícone desenhado em um ponto, sem tomar espaço do layout.
 fn mini_button(ui: &mut egui::Ui, center: egui::Pos2, glyph: chrome::Glyph, tip: &str, salt: &str) -> egui::Response {
     let rect = egui::Rect::from_center_size(center, vec2(BTN_W, 24.0));
@@ -153,7 +158,7 @@ fn strip(ui: &mut egui::Ui, full: egui::Rect, look: &Look, opts: &StripOpts, act
     let show_tasks = opts.tasks && !overlay_tasks && spare >= BTN_W + GAP;
     let mut right = full.right() - PAD;
     if show_close {
-        if mini_button(ui, egui::pos2(right - BTN_W / 2.0, cy), chrome::Glyph::Close, "Fechar o widget e abrir o Navi", "fechar").clicked() {
+        if mini_button(ui, egui::pos2(right - BTN_W / 2.0, cy), chrome::Glyph::Close, &close_tip(), "fechar").clicked() {
             acts.close = true;
         }
         right -= BTN_W + 2.0;
@@ -217,7 +222,7 @@ fn header_row(ui: &mut egui::Ui, rect: egui::Rect, look: &Look, acts: &mut Acts)
     let cy = rect.center().y;
     let mut right = rect.right();
     if rect.width() >= 70.0 {
-        if mini_button(ui, egui::pos2(right - BTN_W / 2.0, cy), chrome::Glyph::Close, "Fechar o widget e abrir o Navi", "fechar").clicked() {
+        if mini_button(ui, egui::pos2(right - BTN_W / 2.0, cy), chrome::Glyph::Close, &close_tip(), "fechar").clicked() {
             acts.close = true;
         }
         right -= BTN_W + 2.0;
@@ -343,7 +348,7 @@ impl MonitorView {
         // no computador, "Sem atividade".
         let name = data.now.current.clone().unwrap_or_else(|| "Sem atividade".to_owned());
         // Sem programa na frente o ícone é a fada do Navi (nunca a inicial de "Sem atividade").
-        let icon_name = if data.now.current.is_some() { name.clone() } else { APP_NAME.to_owned() };
+        let icon_name = if data.now.current.is_some() { name.clone() } else { brand::NAME.to_owned() };
         let state_label = data.now.current.is_some().then(|| data.now.state.label());
         let cur_tex = icon_tex(&mut self.icons, &ctx, data.now.icon.as_ref());
         let rows_tex: Vec<Option<egui::TextureId>> =
