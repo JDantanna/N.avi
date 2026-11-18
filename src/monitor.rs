@@ -62,12 +62,14 @@ pub struct MonitorView {
     prefs: WidgetPrefs,
     /// As preferências mudaram e precisam ser gravadas.
     prefs_changed: bool,
-    /// Onde o widget ficou da última vez que foi trancado (vem das preferências e volta para elas).
+    /// Onde a pessoa deixou o widget da última vez, trancado ou não (vem das preferências e volta para elas).
     place: Option<WidgetPlace>,
     /// O lugar mudou e precisa ser gravado.
     place_changed: bool,
-    /// Onde a pessoa deixou o widget da última vez nesta sessão (canto superior esquerdo, em pixels da tela).
+    /// O mesmo lugar, só o canto superior esquerdo em pixels da tela (para onde o widget nasce).
     last_pos: Option<[i32; 2]>,
+    /// Pixels por ponto da janela do widget na última vez em que se conferiu que ela cabe na tela.
+    fit_ppp: f32,
     /// Posição inicial da janela do widget, em pontos (fica fixa: o egui reenvia a posição quando o valor muda).
     start_pos: egui::Pos2,
     /// Altura com que a janela abre, quando é a de um lugar trancado (senão vale a do formato).
@@ -341,6 +343,7 @@ impl MonitorView {
             place,
             place_changed: false,
             last_pos: None,
+            fit_ppp: 0.0,
             start_pos: egui::Pos2::ZERO,
             start_h: None,
             widget_size: start,
@@ -382,8 +385,8 @@ impl MonitorView {
         self.prefs.locked = locked;
     }
 
-    /// Abre o widget (a janela principal acabou de sair de cena). Ele sempre abre destrancado, no lugar em que
-    /// foi trancado da última vez, se houver, e com o tamanho que tinha.
+    /// Abre o widget (a janela principal acabou de sair de cena). Ele sempre abre destrancado, no último lugar em
+    /// que a pessoa o deixou, se houver, e com o tamanho que tinha.
     pub fn open_widget(&mut self) {
         if !self.widget {
             self.widget = true;
@@ -725,7 +728,7 @@ impl MonitorView {
                         }
                     });
                     ui.checkbox(&mut prefs.locked, "Trancar posição e tamanho")
-                        .on_hover_text("Fixa o widget onde está, e ele volta a esse lugar ao abrir. O botão do meio do mouse ainda o arrasta.");
+                        .on_hover_text("Não deixa mover nem redimensionar o widget com o mouse. O botão do meio do mouse ainda o arrasta.");
                     section(ui, "Opacidade");
                     let mut percent = (prefs.opacity * 100.0).round();
                     ui.spacing_mut().slider_width = PANEL_W - 28.0 - 64.0;

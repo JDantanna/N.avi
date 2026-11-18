@@ -512,14 +512,14 @@ mod tests {
     }
 
     #[test]
-    fn widget_sempre_abre_destrancado_e_lembra_do_lugar() {
+    fn widget_sempre_abre_destrancado_e_lembra_do_ultimo_lugar() {
         // Arquivo das versões 0.9.7 a 0.9.9, que gravavam a trava: ela é ignorada e o resto continua valendo.
         let mut s: Settings = serde_json::from_str("{\"widget_locked\": true, \"widget_opacity\": 0.6}").unwrap();
         s.normalize();
         assert!(!s.widget_prefs().locked);
         assert!((s.widget_opacity - 0.6).abs() < 1e-6);
         assert_eq!(s.widget_place, None);
-        // O lugar de quando foi trancado volta igual, inclusive com coordenadas negativas (monitor à esquerda).
+        // O último lugar volta igual, inclusive com coordenadas negativas (monitor à esquerda).
         let place = WidgetPlace { x: -1700, y: 40, w: 340.0, h: 190.0, format: WidgetFormat::Medio };
         s.widget_place = Some(place);
         s.set_widget_prefs(WidgetPrefs { locked: true, ..s.widget_prefs() });
@@ -619,7 +619,7 @@ impl WidgetFormat {
 }
 
 /// Escolhas do widget: formato, trava e opacidade. Só o formato e a opacidade ficam gravados; a trava vale para
-/// o widget aberto no momento (ele sempre abre destrancado, e o lugar dele fica em [`WidgetPlace`]).
+/// o widget aberto no momento (ele sempre abre destrancado, no último lugar, que fica em [`WidgetPlace`]).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct WidgetPrefs {
     pub format: WidgetFormat,
@@ -629,8 +629,8 @@ pub struct WidgetPrefs {
     pub opacity: f32,
 }
 
-/// Onde o widget ficou quando foi trancado: o canto superior esquerdo em pixels da tela (negativo num monitor à
-/// esquerda ou acima do principal) e o tamanho em pontos. Vale só para o formato em que foi trancado.
+/// Onde o widget ficou da última vez, trancado ou não: o canto superior esquerdo em pixels da tela (negativo num
+/// monitor à esquerda ou acima do principal) e o tamanho em pontos. O tamanho vale só para o formato em que foi deixado.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
 pub struct WidgetPlace {
     pub x: i32,
@@ -661,7 +661,7 @@ pub struct Settings {
     pub widget_format: Option<WidgetFormat>,
     /// Opacidade do widget (0.3 a 1.0).
     pub widget_opacity: f32,
-    /// Posição e tamanho do widget da última vez que foi trancado; `None` enquanto ninguém o trancou.
+    /// Posição e tamanho do widget da última vez que a pessoa o moveu ou redimensionou; `None` enquanto ninguém o fez.
     pub widget_place: Option<WidgetPlace>,
     /// Pasta dos backups (normalmente sincronizada com a nuvem). `None` = backup desligado.
     pub backup_dir: Option<PathBuf>,

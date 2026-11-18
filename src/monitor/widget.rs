@@ -142,7 +142,7 @@ fn lock_button(ui: &mut egui::Ui, center: egui::Pos2, locked: bool) -> egui::Res
     resp.on_hover_text(if locked {
         "Trancado: posição e tamanho fixos. O botão do meio do mouse ainda arrasta. Clique para destrancar."
     } else {
-        "Destrancado: arraste para mover e puxe as bordas para redimensionar. Clique para trancar neste lugar."
+        "Destrancado: arraste para mover e puxe as bordas para redimensionar. Clique para trancar."
     })
 }
 
@@ -349,7 +349,8 @@ fn card(ui: &mut egui::Ui, full: egui::Rect, look: &Look, data: &crate::tracker:
             }
         });
         if big || list_open {
-            egui::ScrollArea::vertical().max_height(ui.available_height()).show(ui, |ui| {
+            // Arrastar sobre a lista move o widget (a roda do mouse é que rola).
+            egui::ScrollArea::vertical().max_height(ui.available_height()).drag_to_scroll(false).show(ui, |ui| {
                 if data.session.is_empty() {
                     ui.weak("Nenhum programa registrado ainda.");
                 }
@@ -387,9 +388,9 @@ pub struct Gesture {
 const CORNER_MARGIN: i32 = 24;
 
 impl MonitorView {
-    /// Onde o widget deve ficar, para uma janela de `size` pixels: o lugar em que foi trancado, senão onde a
-    /// pessoa o deixou da última vez nesta sessão, senão o canto superior direito. Sempre dentro da tela, mesmo
-    /// que o monitor onde ele estava tenha sido desligado.
+    /// Onde o widget deve ficar, para uma janela de `size` pixels: o último lugar onde a pessoa o deixou (trancado
+    /// ou não, nesta sessão ou numa anterior), senão o canto superior direito. Sempre dentro da tela, mesmo que o
+    /// monitor onde ele estava tenha sido desligado.
     fn wanted_position(&self, size: [i32; 2]) -> [i32; 2] {
         let primary = chrome::primary_work_area();
         let want = self
@@ -419,9 +420,9 @@ impl MonitorView {
         self.placed = true;
     }
 
-    /// O arrasto acabou: o widget fica inteiro dentro da tela e o lugar é lembrado (e gravado, se estiver trancado).
-    fn finish_move(&mut self, locked: bool) {
-        let Some(r) = chrome::window_rect(WIDGET_TITLE) else { return };
+    /// Põe o widget inteiro dentro da tela, no monitor onde ele mais aparece. Devolve o canto onde ele ficou.
+    fn fit_widget(&mut self) -> Option<[i32; 2]> {
+        let r = chrome::window_rect(WIDGET_TITLE)?;
         let size = [r[2] - r[0], r[3] - r[1]];
         let mut at = [r[0], r[1]];
         if let Some(work) = chrome::work_area_of(r) {
@@ -430,13 +431,28 @@ impl MonitorView {
         if at != [r[0], r[1]] {
             chrome::move_window(WIDGET_TITLE, at[0], at[1]);
         }
-        self.last_pos = Some(at);
-        if locked {
+        Some(at)
+    }
+
+    /// O arrasto acabou: o widget fica inteiro dentro da tela e esse é o lugar onde ele reabre.
+    fn finish_move(&mut self) {
+        if let Some(at) = self.fit_widget() {
             self.remember_place(at);
         }
     }
 
-    /// Guarda o lugar e o tamanho de agora como os do widget trancado (vai para o arquivo de preferências).
+    /// O redimensionamento acabou: o tamanho novo (e o lugar) é o que vale daqui em diante.
+    fn finish_resize(&mut self) {
+        let Some(r) = chrome::window_rect(WIDGET_TITLE) else { return };
+        let k = self.widget_ppp.max(0.1);
+        self.widget_size = vec2((r[2] - r[0]) as f32 / k, (r[3] - r[1]) as f32 / k);
+        if let Some(at) = self.fit_widget() {
+            self.remember_place(at);
+        }
+    }
+
+    /// Guarda o lugar e o tamanho de agora como os do widget: ele reabre assim, também depois de reiniciar o app
+    /// (vai para o arquivo de preferências).
     fn remember_place(&mut self, at: [i32; 2]) {
         self.last_pos = Some(at);
         self.place = Some(WidgetPlace { x: at[0], y: at[1], w: self.widget_size.x, h: self.widget_size.y, format: self.prefs.format });
@@ -449,6 +465,7 @@ impl MonitorView {
             self.widget_h = 0.0;
             self.frame_fixed = false;
             self.placed = false;
+            self.fit_ppp = 0.0;
             self.gesture = Gesture::default();
             self.widget_outer = None;
             self.set_tasks_open(false);
@@ -551,6 +568,7 @@ impl MonitorView {
         let mut moved_to: Option<[i32; 2]> = None;
         let mut resized_to: Option<chrome::PxRect> = None;
         let mut move_done = false;
+        let mut resize_done = false;
         ctx.show_viewport_immediate(id, builder, |ui, _class| {
             ui.set_opacity((fade * opacity).clamp(0.0, 1.0));
             ppp = ui.ctx().pixels_per_point();
@@ -575,6 +593,21 @@ impl MonitorView {
             };
             ui.painter().rect_stroke(full, chrome::RADIUS, edge, egui::StrokeKind::Inside);
 
+            // O egui pode nunca ver o botão ser solto (com o ponteiro fora do widget e o app na bandeja, a captura
+            // do mouse é parcial): durante um gesto, quem manda é o estado do botão no sistema.
+            if gesture.mv.as_ref().is_some_and(|m| chrome::button_down(m.button) == Some(false)) {
+                gesture.mv = None;
+                move_done = true;
+            }
+            if gesture.edge.is_some() && chrome::button_down(egui::PointerButton::Primary) == Some(false) {
+                gesture.edge = None;
+                resize_done = true;
+            }
+            if gesture.mv.is_some() || gesture.edge.is_some() {
+                // Sem isto o gesto pararia de ser acompanhado junto com os eventos do mouse.
+                ui.ctx().request_repaint();
+            }
+
             // Redimensionar pelas bordas e cantos (só destrancado).
             if !locked {
                 let min_px = [(MIN_SIZE.x * ppp).ceil() as i32, (MIN_SIZE.y * ppp).ceil() as i32];
@@ -597,6 +630,7 @@ impl MonitorView {
                     }
                     if r.drag_stopped() && gesture.edge.as_ref().is_some_and(|e| e.index == i) {
                         gesture.edge = None;
+                        resize_done = true;
                     }
                 }
             }
@@ -677,9 +711,18 @@ impl MonitorView {
             chrome::move_window(WIDGET_TITLE, x, y);
         }
         if move_done {
-            self.finish_move(locked);
+            self.finish_move();
         }
-        // Trancar fixa o lugar de agora; o widget sempre abre destrancado, mas no lugar em que foi trancado.
+        if resize_done {
+            self.finish_resize();
+        }
+        // Se o monitor tem outro DPI, o Windows muda o tamanho da janela depois de ela chegar: confere de novo
+        // que ela cabe na tela (menos no meio de um arrasto, que se confere ao terminar).
+        if self.frame_fixed && self.placed && self.gesture.mv.is_none() && (ppp - self.fit_ppp).abs() > 1e-3 {
+            self.fit_ppp = ppp;
+            self.fit_widget();
+        }
+        // Trancar guarda o lugar e o tamanho de agora (ele já guarda ao fim de cada arrasto e redimensionamento).
         if locked != self.was_locked {
             self.was_locked = locked;
             if locked && let Some(r) = chrome::window_rect(WIDGET_TITLE) {
@@ -1029,7 +1072,7 @@ mod tests {
     }
 
     #[test]
-    fn widget_abre_destrancado_no_lugar_em_que_foi_trancado() {
+    fn widget_abre_destrancado_no_ultimo_lugar_onde_ficou() {
         let medio = WidgetFormat::Medio;
         let place = WidgetPlace { x: -1500, y: 120, w: 410.0, h: 230.0, format: medio };
         let prefs = WidgetPrefs { locked: true, ..crate::model::Settings::default().widget_prefs() };
@@ -1045,7 +1088,7 @@ mod tests {
         view.closing = false;
         view.open_widget();
         assert!(!view.prefs.locked);
-        // Trancado num formato, aberto em outro: só a posição vale, o tamanho é o do formato.
+        // Deixado num formato, aberto em outro: só a posição vale, o tamanho é o do formato.
         let mut view = MonitorView::new(WidgetPrefs { format: WidgetFormat::Grande, ..prefs }, Some(place));
         view.open_widget();
         assert_eq!(view.start_h, None);
@@ -1057,7 +1100,7 @@ mod tests {
     }
 
     #[test]
-    fn trancar_guarda_o_lugar_para_gravar() {
+    fn mover_ou_trancar_guarda_o_lugar_para_gravar() {
         let mut view = MonitorView::new(crate::model::Settings::default().widget_prefs(), None);
         view.widget_size = vec2(340.0, 190.0);
         assert_eq!(view.take_place_change(), None);

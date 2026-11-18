@@ -406,6 +406,24 @@ pub fn cursor_pos() -> Option<[i32; 2]> {
     (unsafe { GetCursorPos(&mut pt) } != 0).then_some([pt.x, pt.y])
 }
 
+/// O botão do mouse está apertado agora, segundo o sistema (não o egui). Com a janela sem ativação e o app na
+/// bandeja, soltar o botão com o ponteiro fora do widget pode não chegar até ele; quem arrasta confere por aqui.
+/// `None` para um botão que não serve de arrasto. O botão principal é o da direita se o mouse for de canhoto.
+pub fn button_down(button: egui::PointerButton) -> Option<bool> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
+
+    let swapped = unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0;
+    let key = match button {
+        egui::PointerButton::Primary if swapped => VK_RBUTTON,
+        egui::PointerButton::Primary => VK_LBUTTON,
+        egui::PointerButton::Middle => VK_MBUTTON,
+        _ => return None,
+    };
+    // O bit mais alto (número negativo) diz que a tecla está apertada agora.
+    Some(unsafe { GetAsyncKeyState(key as i32) } < 0)
+}
+
 /// Põe a janela de título `title` em `rect`, sem ativá-la nem mudar a ordem das janelas.
 pub fn set_window_rect(title: &str, rect: PxRect) -> bool {
     use windows_sys::Win32::UI::WindowsAndMessaging::{SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos};
@@ -523,6 +541,14 @@ mod tests {
     fn canto_de_partida_do_widget() {
         assert_eq!(corner_pos([340, 190], [0, 0, 1920, 1040], 24), [1556, 24]);
         assert_eq!(corner_pos([340, 190], [0, 40, 1920, 1080], 24), [1556, 64], "barra de tarefas no topo");
+    }
+
+    #[test]
+    fn so_os_botoes_de_arrasto_tem_estado() {
+        // O botão da direita (menu) não serve de arrasto; os outros devolvem algum estado, sem erro.
+        assert_eq!(button_down(egui::PointerButton::Secondary), None);
+        assert!(button_down(egui::PointerButton::Primary).is_some());
+        assert!(button_down(egui::PointerButton::Middle).is_some());
     }
 
     #[test]
