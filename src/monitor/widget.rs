@@ -350,8 +350,8 @@ fn card(ui: &mut egui::Ui, full: egui::Rect, look: &Look, data: &crate::tracker:
             }
         });
         if big || list_open {
-            // Arrastar sobre a lista move o widget (a roda do mouse é que rola).
-            egui::ScrollArea::vertical().max_height(ui.available_height()).drag_to_scroll(false).show(ui, |ui| {
+            // Com o mouse, arrastar sobre a lista move o widget (o egui só rola por arraste em tela de toque).
+            egui::ScrollArea::vertical().max_height(ui.available_height()).show(ui, |ui| {
                 if data.session.is_empty() {
                     ui.weak("Nenhum programa registrado ainda.");
                 }
@@ -718,8 +718,9 @@ impl MonitorView {
             self.finish_resize();
         }
         // Se o monitor tem outro DPI, o Windows muda o tamanho da janela depois de ela chegar: confere de novo
-        // que ela cabe na tela (menos no meio de um arrasto, que se confere ao terminar).
-        if self.frame_fixed && self.placed && self.gesture.mv.is_none() && (ppp - self.fit_ppp).abs() > 1e-3 {
+        // que ela cabe na tela (menos no meio de um arrasto ou redimensionamento, que se confere ao terminar).
+        let moving = self.gesture.mv.is_some() || self.gesture.edge.is_some();
+        if self.frame_fixed && self.placed && !moving && (ppp - self.fit_ppp).abs() > 1e-3 {
             self.fit_ppp = ppp;
             self.fit_widget();
         }
