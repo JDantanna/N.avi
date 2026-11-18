@@ -197,34 +197,40 @@ impl Planner {
                 .shrink(1.5);
                 cells.push((rect, d));
                 let in_month = d.month() == first.month();
-                let bg = if d == today {
-                    ACCENT.gamma_multiply(0.18)
+                let is_today = d == today;
+                let bg = if is_today {
+                    // Hoje: fundo azul bem mais forte que o dos outros dias (os chips das tarefas continuam legíveis por cima).
+                    Color32::from_rgb(28, 30, 40).lerp_to_gamma(ACCENT, 0.32)
                 } else if in_month {
                     Color32::from_rgb(28, 30, 40)
                 } else {
                     Color32::from_rgb(22, 24, 32)
                 };
                 painter.rect_filled(rect, 4.0, bg);
+                if is_today {
+                    painter.rect_stroke(rect, 4.0, egui::Stroke::new(2.0, ACCENT), egui::StrokeKind::Inside);
+                }
 
                 let num_rect = egui::Rect::from_min_size(rect.min, vec2(rect.width(), 20.0));
                 let resp = ui.interact(num_rect, ui.scope_id().with(("dia", d)), Sense::click());
                 if resp.clicked() {
                     goto_day = Some(d);
                 }
-                let num_color = if d == today {
-                    ACCENT
-                } else if in_month {
-                    Color32::LIGHT_GRAY
+                if is_today {
+                    // O número de hoje vai num círculo cheio na cor de destaque.
+                    let center = egui::pos2(num_rect.left() + 15.0, num_rect.center().y + 1.0);
+                    painter.circle_filled(center, 10.0, if resp.hovered() { Color32::WHITE } else { ACCENT });
+                    painter.text(center, Align2::CENTER_CENTER, d.day().to_string(), FontId::proportional(13.0), crate::theme::BG);
                 } else {
-                    Color32::DARK_GRAY
-                };
-                painter.text(
-                    num_rect.left_center() + vec2(6.0, 0.0),
-                    Align2::LEFT_CENTER,
-                    d.day().to_string(),
-                    FontId::proportional(13.0),
-                    if resp.hovered() { Color32::WHITE } else { num_color },
-                );
+                    let num_color = if in_month { Color32::LIGHT_GRAY } else { Color32::DARK_GRAY };
+                    painter.text(
+                        num_rect.left_center() + vec2(6.0, 0.0),
+                        Align2::LEFT_CENTER,
+                        d.day().to_string(),
+                        FontId::proportional(13.0),
+                        if resp.hovered() { Color32::WHITE } else { num_color },
+                    );
+                }
 
                 let list = self.tasks_on(store, d);
                 let fit = (((rect.height() - 22.0) / 17.0) as usize).max(1);

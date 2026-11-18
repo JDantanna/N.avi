@@ -48,6 +48,10 @@ pub enum Glyph {
     Check,
     /// Nuvem: backup.
     Cloud,
+    /// Cadeado fechado: o widget está trancado.
+    Lock,
+    /// Cadeado aberto: o widget está destrancado.
+    Unlock,
 }
 
 pub fn window_button(ui: &mut egui::Ui, glyph: Glyph) -> Response {
@@ -159,6 +163,24 @@ pub fn paint_glyph(p: &egui::Painter, c: Pos2, glyph: Glyph, col: Color32, spin:
                 p.add(egui::Shape::line(pts, st));
             }
             p.line_segment([c + vec2(-4.4, 4.4), c + vec2(4.6, 4.4)], st);
+        }
+        Glyph::Lock | Glyph::Unlock => {
+            // Argola: meia circunferência por cima do corpo. Fechada, as duas pernas descem até o corpo;
+            // aberta, ela sobe e só a perna da direita continua presa.
+            let open = glyph == Glyph::Unlock;
+            let ring = if open { vec2(0.0, -3.0) } else { vec2(0.0, -0.5) };
+            let arc: Vec<Pos2> = (0..=10)
+                .map(|i| {
+                    let a = std::f32::consts::PI * (1.0 + i as f32 / 10.0);
+                    c + ring + vec2(a.cos(), a.sin()) * 3.0
+                })
+                .collect();
+            p.add(egui::Shape::line(arc, st));
+            p.line_segment([c + ring + vec2(3.0, 0.0), c + vec2(3.0, -0.5)], st);
+            if !open {
+                p.line_segment([c + ring + vec2(-3.0, 0.0), c + vec2(-3.0, -0.5)], st);
+            }
+            p.rect_filled(Rect::from_min_max(c + vec2(-4.8, -0.5), c + vec2(4.8, 5.8)), 1.6, col);
         }
         Glyph::Check => {
             let thin = Stroke::new(1.3, col);
@@ -317,10 +339,10 @@ pub fn work_area(title: &str, pixels_per_point: f32) -> Option<Rect> {
     }
 }
 
-/// Faixas finas nas bordas e cantos que iniciam o redimensionamento.
-pub fn resize_handles(ui: &mut egui::Ui, full: Rect) {
+/// As oito faixas finas nas bordas e cantos que iniciam o redimensionamento: (área, lado, cursor).
+pub fn handle_zones(full: Rect) -> [(Rect, Dir, CursorIcon); 8] {
     let (e, c) = (5.0, 12.0);
-    let zones = [
+    [
         (Rect::from_min_max(full.left_top() + vec2(c, 0.0), full.right_top() + vec2(-c, e)), Dir::North, CursorIcon::ResizeVertical),
         (Rect::from_min_max(full.left_bottom() + vec2(c, -e), full.right_bottom() + vec2(-c, 0.0)), Dir::South, CursorIcon::ResizeVertical),
         (Rect::from_min_max(full.left_top() + vec2(0.0, c), full.left_bottom() + vec2(e, -c)), Dir::West, CursorIcon::ResizeHorizontal),
@@ -329,8 +351,12 @@ pub fn resize_handles(ui: &mut egui::Ui, full: Rect) {
         (Rect::from_min_size(full.right_top() + vec2(-c, 0.0), vec2(c, c)), Dir::NorthEast, CursorIcon::ResizeNeSw),
         (Rect::from_min_size(full.left_bottom() + vec2(0.0, -c), vec2(c, c)), Dir::SouthWest, CursorIcon::ResizeNeSw),
         (Rect::from_min_size(full.right_bottom() - vec2(c, c), vec2(c, c)), Dir::SouthEast, CursorIcon::ResizeNwSe),
-    ];
-    for (i, (rect, dir, cursor)) in zones.into_iter().enumerate() {
+    ]
+}
+
+/// Faixas finas nas bordas e cantos que iniciam o redimensionamento (feito pelo Windows).
+pub fn resize_handles(ui: &mut egui::Ui, full: Rect) {
+    for (i, (rect, dir, cursor)) in handle_zones(full).into_iter().enumerate() {
         let r = ui.interact(rect, ui.scope_id().with(("resize", i)), Sense::drag());
         if r.hovered() || r.dragged() {
             ui.ctx().set_cursor_icon(cursor);
@@ -338,5 +364,185 @@ pub fn resize_handles(ui: &mut egui::Ui, full: Rect) {
         if r.drag_started() {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Mover e redimensionar uma janela por conta própria. O arrasto do sistema (o que o egui pede com StartDrag e
+// BeginResize) entra num laço do Windows que não começa em janelas que não podem ser ativadas, como o widget:
+// ele abria num ponto e não saía dele. Aqui a janela segue o ponteiro com SetWindowPos, em pixels da tela.
+
+/// Retângulo em pixels da tela, como o Windows os conta: `[esquerda, topo, direita, base]`.
+pub type PxRect = [i32; 4];
+
+fn find_window(title: &str) -> Option<HWND> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
+
+    let wide: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+    let hwnd = unsafe { FindWindowW(std::ptr::null(), wide.as_ptr()) };
+    (!hwnd.is_null()).then_some(hwnd)
+}
+
+fn px_rect(r: windows_sys::Win32::Foundation::RECT) -> PxRect {
+    [r.left, r.top, r.right, r.bottom]
+}
+
+/// Onde está, na tela, a janela de título `title`.
+pub fn window_rect(title: &str) -> Option<PxRect> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
+
+    let hwnd = find_window(title)?;
+    let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    (unsafe { GetWindowRect(hwnd, &mut r) } != 0).then(|| px_rect(r))
+}
+
+/// Onde está o ponteiro do mouse, em pixels da tela.
+pub fn cursor_pos() -> Option<[i32; 2]> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    let mut pt = POINT { x: 0, y: 0 };
+    (unsafe { GetCursorPos(&mut pt) } != 0).then_some([pt.x, pt.y])
+}
+
+/// Põe a janela de título `title` em `rect`, sem ativá-la nem mudar a ordem das janelas.
+pub fn set_window_rect(title: &str, rect: PxRect) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos};
+
+    let Some(hwnd) = find_window(title) else { return false };
+    let (w, h) = ((rect[2] - rect[0]).max(1), (rect[3] - rect[1]).max(1));
+    unsafe { SetWindowPos(hwnd, std::ptr::null_mut(), rect[0], rect[1], w, h, SWP_NOZORDER | SWP_NOACTIVATE) != 0 }
+}
+
+/// Leva a janela de título `title` para o canto `(x, y)`, sem mudar o tamanho.
+pub fn move_window(title: &str, x: i32, y: i32) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos};
+
+    let Some(hwnd) = find_window(title) else { return false };
+    unsafe { SetWindowPos(hwnd, std::ptr::null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) != 0 }
+}
+
+/// Área de trabalho (a tela sem a barra de tarefas) do monitor onde `rect` aparece mais; se nenhum monitor
+/// o contém (o monitor que estava ali foi desligado), a do monitor mais próximo.
+pub fn work_area_of(rect: PxRect) -> Option<PxRect> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect};
+
+    let r = RECT { left: rect[0], top: rect[1], right: rect[2], bottom: rect[3] };
+    unsafe {
+        let monitor = MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST);
+        let mut info: MONITORINFO = std::mem::zeroed();
+        info.cbSize = size_of::<MONITORINFO>() as u32;
+        (GetMonitorInfoW(monitor, &mut info) != 0).then(|| px_rect(info.rcWork))
+    }
+}
+
+/// Área de trabalho do monitor principal.
+pub fn primary_work_area() -> Option<PxRect> {
+    use std::ffi::c_void;
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SPI_GETWORKAREA, SystemParametersInfoW};
+
+    let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    (unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut r as *mut RECT as *mut c_void, 0) } != 0).then(|| px_rect(r))
+}
+
+/// O canto superior esquerdo mais próximo de `pos` com a janela (de `size` pixels) toda dentro de `work`.
+pub fn fit_in(pos: [i32; 2], size: [i32; 2], work: PxRect) -> [i32; 2] {
+    let max_x = (work[2] - size[0]).max(work[0]);
+    let max_y = (work[3] - size[1]).max(work[1]);
+    [pos[0].clamp(work[0], max_x), pos[1].clamp(work[1], max_y)]
+}
+
+/// Canto superior direito da área de trabalho, com uma margem: onde o widget aparece na primeira vez.
+pub fn corner_pos(size: [i32; 2], work: PxRect, margin: i32) -> [i32; 2] {
+    fit_in([work[2] - size[0] - margin, work[1] + margin], size, work)
+}
+
+/// Para onde vai a janela quando o ponteiro anda de `from` para `now`, tendo ela começado em `origin`.
+pub fn drag_target(origin: [i32; 2], from: [i32; 2], now: [i32; 2]) -> [i32; 2] {
+    [origin[0] + now[0] - from[0], origin[1] + now[1] - from[1]]
+}
+
+/// A janela `rect` depois de a borda ou o canto `dir` ser puxado por `(dx, dy)` pixels; nunca menor que `min`
+/// (a borda que se move é a que para).
+pub fn resized(rect: PxRect, dir: Dir, (dx, dy): (i32, i32), min: [i32; 2]) -> PxRect {
+    let [mut left, mut top, mut right, mut bottom] = rect;
+    let west = matches!(dir, Dir::West | Dir::NorthWest | Dir::SouthWest);
+    let east = matches!(dir, Dir::East | Dir::NorthEast | Dir::SouthEast);
+    let north = matches!(dir, Dir::North | Dir::NorthWest | Dir::NorthEast);
+    let south = matches!(dir, Dir::South | Dir::SouthWest | Dir::SouthEast);
+    if west {
+        left += dx;
+    }
+    if east {
+        right += dx;
+    }
+    if north {
+        top += dy;
+    }
+    if south {
+        bottom += dy;
+    }
+    if right - left < min[0] {
+        if west {
+            left = right - min[0];
+        } else {
+            right = left + min[0];
+        }
+    }
+    if bottom - top < min[1] {
+        if north {
+            top = bottom - min[1];
+        } else {
+            bottom = top + min[1];
+        }
+    }
+    [left, top, right, bottom]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dentro_da_tela_mesmo_sem_o_monitor_de_antes() {
+        let work = [0, 0, 1920, 1040];
+        assert_eq!(fit_in([100, 80], [340, 190], work), [100, 80], "já cabe: não mexe");
+        assert_eq!(fit_in([2500, 80], [340, 190], work), [1580, 80], "monitor desligado à direita");
+        assert_eq!(fit_in([-1800, -300], [340, 190], work), [0, 0], "monitor desligado à esquerda e acima");
+        assert_eq!(fit_in([1800, 1000], [340, 190], work), [1580, 850], "passou da borda de baixo e da direita");
+        // Janela maior que a tela: fica no canto de cima, sem erro.
+        assert_eq!(fit_in([50, 50], [3000, 2000], work), [0, 0]);
+        // Segundo monitor à esquerda, com coordenadas negativas.
+        assert_eq!(fit_in([-1700, 40], [340, 190], [-1920, 0, 0, 1040]), [-1700, 40]);
+    }
+
+    #[test]
+    fn canto_de_partida_do_widget() {
+        assert_eq!(corner_pos([340, 190], [0, 0, 1920, 1040], 24), [1556, 24]);
+        assert_eq!(corner_pos([340, 190], [0, 40, 1920, 1080], 24), [1556, 64], "barra de tarefas no topo");
+    }
+
+    #[test]
+    fn arrastar_acompanha_o_ponteiro() {
+        assert_eq!(drag_target([500, 300], [900, 700], [950, 640]), [550, 240]);
+        assert_eq!(drag_target([500, 300], [900, 700], [900, 700]), [500, 300]);
+    }
+
+    #[test]
+    fn redimensionar_pela_borda_e_pelo_canto() {
+        let r = [100, 100, 440, 290];
+        assert_eq!(resized(r, Dir::East, (30, 99), [90, 24]), [100, 100, 470, 290], "a borda de lado só mexe na largura");
+        assert_eq!(resized(r, Dir::West, (-20, 5), [90, 24]), [80, 100, 440, 290]);
+        assert_eq!(resized(r, Dir::South, (7, 15), [90, 24]), [100, 100, 440, 305]);
+        assert_eq!(resized(r, Dir::NorthWest, (10, 10), [90, 24]), [110, 110, 440, 290]);
+        assert_eq!(resized(r, Dir::SouthEast, (-10, -10), [90, 24]), [100, 100, 430, 280]);
+        // Nunca menor que o mínimo, e a borda que se move é a que para.
+        assert_eq!(resized(r, Dir::East, (-1000, 0), [90, 24]), [100, 100, 190, 290]);
+        assert_eq!(resized(r, Dir::West, (1000, 0), [90, 24]), [350, 100, 440, 290]);
+        assert_eq!(resized(r, Dir::North, (0, 1000), [90, 24]), [100, 266, 440, 290]);
+        assert_eq!(resized(r, Dir::South, (0, -1000), [90, 24]), [100, 100, 440, 124]);
     }
 }

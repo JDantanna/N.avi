@@ -60,8 +60,10 @@ struct Look<'a> {
     /// Nome com que o ícone é escolhido: sem ninguém no computador é o do próprio Navi (a fada), nunca uma letra.
     icon_name: &'a str,
     tex: Option<egui::TextureId>,
-    /// O mouse está sobre o widget (a barra só mostra a seta das tarefas assim).
+    /// O mouse está sobre o widget (a barra só mostra a seta das tarefas e o cadeado assim).
     hover: bool,
+    /// Trancado: não muda de posição nem de tamanho com o mouse.
+    locked: bool,
     clock: &'a str,
     time_color: Color32,
     tasks_open: bool,
@@ -105,6 +107,7 @@ struct Acts {
     close: bool,
     toggle_tasks: bool,
     toggle_list: bool,
+    toggle_lock: bool,
 }
 
 /// Dica do botão de fechar: fechar o widget abre o app.
@@ -125,8 +128,26 @@ fn mini_button(ui: &mut egui::Ui, center: egui::Pos2, glyph: chrome::Glyph, tip:
     resp.on_hover_text(tip)
 }
 
+/// O cadeado: destrancado é o convite para pôr o widget onde a pessoa quiser (arrastar move, as bordas
+/// redimensionam); clicar tranca ali mesmo. Destrancado ele fica em azul, para o estado ser claro sem texto.
+fn lock_button(ui: &mut egui::Ui, center: egui::Pos2, locked: bool) -> egui::Response {
+    let rect = egui::Rect::from_center_size(center, vec2(BTN_W, 24.0));
+    let resp = ui.interact(rect, ui.scope_id().with("trancar"), Sense::click());
+    let hot = resp.hovered();
+    if hot {
+        ui.painter().rect_filled(rect.shrink2(vec2(1.0, 0.0)), 7.0, Color32::from_white_alpha(22));
+    }
+    let (glyph, idle) = if locked { (chrome::Glyph::Lock, Color32::from_gray(185)) } else { (chrome::Glyph::Unlock, ACCENT.gamma_multiply(0.85)) };
+    chrome::paint_glyph(ui.painter(), center, glyph, if hot { Color32::WHITE } else { idle }, 0.0);
+    resp.on_hover_text(if locked {
+        "Trancado: posição e tamanho fixos. O botão do meio do mouse ainda arrasta. Clique para destrancar."
+    } else {
+        "Destrancado: arraste para mover e puxe as bordas para redimensionar. Clique para trancar neste lugar."
+    })
+}
+
 /// Barra e formato pequeno: uma faixa com o ícone e o cronômetro. O pequeno também mostra o nome (se couber)
-/// e o botão de fechar; os dois têm a seta das tarefas. Os botões somem quando a janela fica estreita demais.
+/// e o botão de fechar; os dois têm a seta das tarefas e o cadeado. Os botões somem quando a janela fica estreita demais.
 fn strip(ui: &mut egui::Ui, full: egui::Rect, look: &Look, opts: &StripOpts, acts: &mut Acts) {
     let p = ui.painter().clone();
     let (h, cy) = (full.height(), full.center().y);
@@ -153,9 +174,14 @@ fn strip(ui: &mut egui::Ui, full: egui::Rect, look: &Look, opts: &StripOpts, act
     if show_close {
         spare -= BTN_W + GAP;
     }
-    // Na barra a seta das tarefas não tem lugar fixo: aparece por cima, só com o mouse sobre ela.
+    // Na barra a seta das tarefas e o cadeado não têm lugar fixo: aparecem por cima, só com o mouse sobre ela
+    // (destrancada, o cadeado aberto fica sempre à vista).
     let overlay_tasks = opts.tasks && !opts.name;
     let show_tasks = opts.tasks && !overlay_tasks && spare >= BTN_W + GAP;
+    if show_tasks {
+        spare -= BTN_W + GAP;
+    }
+    let show_lock = !overlay_tasks && spare >= BTN_W + GAP;
     let mut right = full.right() - PAD;
     if show_close {
         if mini_button(ui, egui::pos2(right - BTN_W / 2.0, cy), chrome::Glyph::Close, &close_tip(), "fechar").clicked() {
@@ -167,6 +193,12 @@ fn strip(ui: &mut egui::Ui, full: egui::Rect, look: &Look, opts: &StripOpts, act
         let glyph = if look.tasks_open { chrome::Glyph::ChevronUp } else { chrome::Glyph::ChevronDown };
         if mini_button(ui, egui::pos2(right - BTN_W / 2.0, cy), glyph, "Tarefas de hoje", "tarefas").clicked() {
             acts.toggle_tasks = true;
+        }
+        right -= BTN_W;
+    }
+    if show_lock {
+        if lock_button(ui, egui::pos2(right - BTN_W / 2.0, cy), look.locked).clicked() {
+            acts.toggle_lock = true;
         }
         right -= BTN_W;
     }
@@ -202,6 +234,12 @@ fn strip(ui: &mut egui::Ui, full: egui::Rect, look: &Look, opts: &StripOpts, act
                     x0 = (limit - total).max(zone.left());
                 }
             }
+            // Na barra o cadeado fica à esquerda do par, se houver lugar: o par não anda quando ele aparece.
+            if overlay_tasks && (look.hover || !look.locked) && x0 - full.left() >= BTN_W + 6.0 {
+                if lock_button(ui, egui::pos2(full.left() + 4.0 + BTN_W / 2.0, cy), look.locked).clicked() {
+                    acts.toggle_lock = true;
+                }
+            }
             let icon = icon_at(x0);
             paint_icon(&p, icon, look.icon_name, look.tex, true);
             ui.interact(icon, ui.scope_id().with("icone"), Sense::hover()).on_hover_text(look.tip());
@@ -231,6 +269,12 @@ fn header_row(ui: &mut egui::Ui, rect: egui::Rect, look: &Look, acts: &mut Acts)
         let glyph = if look.tasks_open { chrome::Glyph::ChevronUp } else { chrome::Glyph::ChevronDown };
         if mini_button(ui, egui::pos2(right - BTN_W / 2.0, cy), glyph, "Tarefas de hoje", "tarefas").clicked() {
             acts.toggle_tasks = true;
+        }
+        right -= BTN_W;
+    }
+    if rect.width() >= 170.0 {
+        if lock_button(ui, egui::pos2(right - BTN_W / 2.0, cy), look.locked).clicked() {
+            acts.toggle_lock = true;
         }
         right -= BTN_W;
     }
@@ -317,12 +361,95 @@ fn card(ui: &mut egui::Ui, full: egui::Rect, look: &Look, data: &crate::tracker:
     });
 }
 
+/// Arrasto do widget em andamento: onde estavam o ponteiro e a janela quando começou (pixels da tela).
+struct MoveFrom {
+    cursor: [i32; 2],
+    origin: [i32; 2],
+    button: egui::PointerButton,
+}
+
+/// Redimensionamento em andamento: o ponteiro e a janela de quando começou, e qual borda ou canto foi puxado.
+struct EdgeFrom {
+    cursor: [i32; 2],
+    rect: chrome::PxRect,
+    dir: egui::viewport::ResizeDirection,
+    index: usize,
+}
+
+/// O que o mouse está fazendo com a janela do widget.
+#[derive(Default)]
+pub struct Gesture {
+    mv: Option<MoveFrom>,
+    edge: Option<EdgeFrom>,
+}
+
+/// Distância do widget às bordas da tela quando aparece pela primeira vez, em pixels.
+const CORNER_MARGIN: i32 = 24;
+
 impl MonitorView {
+    /// Onde o widget deve ficar, para uma janela de `size` pixels: o lugar em que foi trancado, senão onde a
+    /// pessoa o deixou da última vez nesta sessão, senão o canto superior direito. Sempre dentro da tela, mesmo
+    /// que o monitor onde ele estava tenha sido desligado.
+    fn wanted_position(&self, size: [i32; 2]) -> [i32; 2] {
+        let primary = chrome::primary_work_area();
+        let want = self
+            .place
+            .map(|p| [p.x, p.y])
+            .or(self.last_pos)
+            .unwrap_or_else(|| primary.map_or([CORNER_MARGIN * 4, CORNER_MARGIN * 4], |w| chrome::corner_pos(size, w, CORNER_MARGIN)));
+        let work = chrome::work_area_of([want[0], want[1], want[0] + size[0], want[1] + size[1]]).or(primary);
+        work.map_or(want, |w| chrome::fit_in(want, size, w))
+    }
+
+    /// Posição inicial da janela em pontos, para o `ViewportBuilder` (que não conhece pixels). Só serve para ela
+    /// nascer perto do lugar certo: `place_widget` acerta em pixels assim que a janela existe.
+    fn start_position(&self, pixels_per_point: f32) -> egui::Pos2 {
+        let k = pixels_per_point.max(0.1);
+        let at = self.wanted_position([(self.widget_start.x * k) as i32, (self.widget_start.y * k) as i32]);
+        egui::pos2(at[0] as f32 / k, at[1] as f32 / k)
+    }
+
+    /// Leva a janela, já criada, ao lugar certo, em pixels da tela e com o tamanho que ela de fato ficou.
+    fn place_widget(&mut self) {
+        let Some(r) = chrome::window_rect(WIDGET_TITLE) else { return };
+        let at = self.wanted_position([r[2] - r[0], r[3] - r[1]]);
+        if at != [r[0], r[1]] {
+            chrome::move_window(WIDGET_TITLE, at[0], at[1]);
+        }
+        self.placed = true;
+    }
+
+    /// O arrasto acabou: o widget fica inteiro dentro da tela e o lugar é lembrado (e gravado, se estiver trancado).
+    fn finish_move(&mut self, locked: bool) {
+        let Some(r) = chrome::window_rect(WIDGET_TITLE) else { return };
+        let size = [r[2] - r[0], r[3] - r[1]];
+        let mut at = [r[0], r[1]];
+        if let Some(work) = chrome::work_area_of(r) {
+            at = chrome::fit_in(at, size, work);
+        }
+        if at != [r[0], r[1]] {
+            chrome::move_window(WIDGET_TITLE, at[0], at[1]);
+        }
+        self.last_pos = Some(at);
+        if locked {
+            self.remember_place(at);
+        }
+    }
+
+    /// Guarda o lugar e o tamanho de agora como os do widget trancado (vai para o arquivo de preferências).
+    fn remember_place(&mut self, at: [i32; 2]) {
+        self.last_pos = Some(at);
+        self.place = Some(WidgetPlace { x: at[0], y: at[1], w: self.widget_size.x, h: self.widget_size.y, format: self.prefs.format });
+        self.place_changed = true;
+    }
+
     /// Janela flutuante; deve ser chamada a cada quadro, qualquer que seja a aba.
     pub fn floating(&mut self, ui: &mut egui::Ui, tracker: &Tracker) {
         if !self.widget {
             self.widget_h = 0.0;
             self.frame_fixed = false;
+            self.placed = false;
+            self.gesture = Gesture::default();
             self.widget_outer = None;
             self.set_tasks_open(false);
             return;
@@ -371,16 +498,27 @@ impl MonitorView {
         self.widget_h = height;
         // No primeiro quadro a janela ainda não existe; o comando só vale a partir do próximo.
         if first {
-            self.widget_start = vec2(self.widget_w, height);
+            // Aberto de um lugar trancado, ele volta ao tamanho de antes (sem passar da tela de agora).
+            let mut start = vec2(self.widget_w, self.start_h.take().unwrap_or(height));
+            if let Some(work) = chrome::primary_work_area() {
+                let ppp = ctx.pixels_per_point().max(0.1);
+                start = start.min(vec2((work[2] - work[0]) as f32 / ppp, (work[3] - work[1]) as f32 / ppp)).max(MIN_SIZE);
+            }
+            self.widget_start = start;
+            self.widget_w = start.x;
+            self.start_pos = self.start_position(ctx.pixels_per_point());
         } else {
             self.widget_zoom = zoom;
         }
 
-        // O tamanho aqui é só o inicial e fica fixo: o egui reenvia o tamanho sempre que este valor muda,
-        // o que brigaria com o redimensionamento feito pelo usuário. Já a trava de tamanho muda de verdade.
+        // O tamanho e o lugar daqui são só os iniciais e ficam fixos: o egui reenvia um e outro sempre que o valor
+        // muda, o que brigaria com o arrasto e o redimensionamento feitos pelo usuário. A trava não mexe na janela:
+        // o próprio widget é que deixa de arrastar e de mostrar as bordas (mudar `resizable` faria o winit refazer os
+        // estilos da janela e apagar o "não ativar" dela).
         let builder = egui::ViewportBuilder::default()
             .with_title(WIDGET_TITLE)
             .with_inner_size(self.widget_start)
+            .with_position(self.start_pos)
             .with_min_inner_size(MIN_SIZE)
             .with_decorations(false)
             .with_transparent(true)
@@ -389,7 +527,7 @@ impl MonitorView {
             .with_taskbar(false)
             // Surge sem roubar o foco de quem estiver em uso quando o Navi é minimizado.
             .with_active(false)
-            .with_resizable(!locked);
+            .with_resizable(true);
         // Sem nada sendo rastreado (ocioso ou sem programa), o widget fica vermelho.
         let tracking = !data.now.idle && data.now.current.is_some();
         let tracked_name = if tracking { data.now.current.clone() } else { None };
@@ -408,6 +546,11 @@ impl MonitorView {
         let mut size = None;
         let mut outer = None;
         let mut ppp = self.widget_ppp;
+        // Arrastar e redimensionar: o widget acompanha o ponteiro por conta própria (ver `chrome::drag_target`).
+        let mut gesture = std::mem::take(&mut self.gesture);
+        let mut moved_to: Option<[i32; 2]> = None;
+        let mut resized_to: Option<chrome::PxRect> = None;
+        let mut move_done = false;
         ctx.show_viewport_immediate(id, builder, |ui, _class| {
             ui.set_opacity((fade * opacity).clamp(0.0, 1.0));
             ppp = ui.ctx().pixels_per_point();
@@ -422,19 +565,62 @@ impl MonitorView {
             let glow = ui.ctx().animate_bool_with_time(ui.scope_id().with("widget_glow"), drag.contains_pointer(), 0.2);
             let lit = fill.lerp_to_gamma(Color32::from_rgb(170, 190, 255), 0.13 * glow);
             ui.painter().rect_filled(full, chrome::RADIUS, lit);
-            let edge = if tracking {
+            let edge = if !tracking {
+                Stroke::new(1.5, Color32::from_rgb(214, 70, 70).lerp_to_gamma(Color32::from_rgb(255, 130, 130), glow))
+            } else if locked {
                 Stroke::new(1.0, Color32::from_white_alpha(22 + (60.0 * glow) as u8))
             } else {
-                Stroke::new(1.5, Color32::from_rgb(214, 70, 70).lerp_to_gamma(Color32::from_rgb(255, 130, 130), glow))
+                // Destrancado: um fio azul na borda, discreto, diz que ele pode ser movido e redimensionado.
+                Stroke::new(1.0, ACCENT.gamma_multiply(0.42 + 0.3 * glow))
             };
             ui.painter().rect_stroke(full, chrome::RADIUS, edge, egui::StrokeKind::Inside);
-            // Trancado: sem alças de redimensionar (a janela também deixa de ser redimensionável).
+
+            // Redimensionar pelas bordas e cantos (só destrancado).
             if !locked {
-                chrome::resize_handles(ui, full);
+                let min_px = [(MIN_SIZE.x * ppp).ceil() as i32, (MIN_SIZE.y * ppp).ceil() as i32];
+                for (i, (rect, dir, cursor)) in chrome::handle_zones(full).into_iter().enumerate() {
+                    let r = ui.interact(rect, ui.scope_id().with(("borda", i)), Sense::drag());
+                    if r.hovered() || r.dragged() {
+                        ui.ctx().set_cursor_icon(cursor);
+                    }
+                    if r.drag_started_by(egui::PointerButton::Primary)
+                        && let (Some(from), Some(win)) = (chrome::cursor_pos(), chrome::window_rect(WIDGET_TITLE))
+                    {
+                        gesture.edge = Some(EdgeFrom { cursor: from, rect: win, dir, index: i });
+                    }
+                    if r.dragged_by(egui::PointerButton::Primary)
+                        && let Some(e) = gesture.edge.as_ref().filter(|e| e.index == i)
+                        && let Some(now) = chrome::cursor_pos()
+                    {
+                        resized_to = Some(chrome::resized(e.rect, e.dir, (now[0] - e.cursor[0], now[1] - e.cursor[1]), min_px));
+                        ui.ctx().request_repaint();
+                    }
+                    if r.drag_stopped() && gesture.edge.as_ref().is_some_and(|e| e.index == i) {
+                        gesture.edge = None;
+                    }
+                }
             }
 
-            if drag.drag_started() {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            // Mover: arrastar com o botão principal (destrancado) ou com o do meio (mesmo trancado).
+            let started = [egui::PointerButton::Primary, egui::PointerButton::Middle]
+                .into_iter()
+                .find(|b| drag.drag_started_by(*b) && (*b == egui::PointerButton::Middle || !locked));
+            if let Some(button) = started
+                && gesture.edge.is_none()
+                && let (Some(from), Some(win)) = (chrome::cursor_pos(), chrome::window_rect(WIDGET_TITLE))
+            {
+                gesture.mv = Some(MoveFrom { cursor: from, origin: [win[0], win[1]], button });
+            }
+            if let Some(mv) = &gesture.mv
+                && drag.dragged_by(mv.button)
+            {
+                if let Some(now) = chrome::cursor_pos() {
+                    moved_to = Some(chrome::drag_target(mv.origin, mv.cursor, now));
+                }
+                ui.ctx().request_repaint();
+            }
+            if drag.drag_stopped() && gesture.mv.take().is_some() {
+                move_done = true;
             }
             if drag.double_clicked() {
                 open_app = true;
@@ -449,6 +635,7 @@ impl MonitorView {
                 icon_name: &icon_name,
                 tex: cur_tex,
                 hover: drag.contains_pointer(),
+                locked,
                 clock: &clock_text,
                 time_color,
                 tasks_open,
@@ -466,18 +653,42 @@ impl MonitorView {
         });
         if let Some(s) = size {
             self.widget_w = s.x.max(MIN_SIZE.x);
+            self.widget_size = s;
         }
         if outer.is_some() {
             self.widget_outer = outer;
         }
         self.widget_ppp = ppp;
-        // A janela só existe a partir do primeiro quadro; então tira a moldura quadrada do Windows
-        // e a faz não tomar o foco quando clicam nela.
+        self.gesture = gesture;
+        // A janela só existe a partir do primeiro quadro; então tira a moldura quadrada do Windows,
+        // a faz não tomar o foco quando clicam nela e a leva para o lugar dela.
         if !first && !self.frame_fixed {
             self.frame_fixed = chrome::flatten_window(WIDGET_TITLE);
             if self.frame_fixed {
                 chrome::no_activate(WIDGET_TITLE);
             }
+        }
+        if self.frame_fixed && !self.placed {
+            self.place_widget();
+        }
+        if let Some(rect) = resized_to {
+            chrome::set_window_rect(WIDGET_TITLE, rect);
+        } else if let Some([x, y]) = moved_to {
+            chrome::move_window(WIDGET_TITLE, x, y);
+        }
+        if move_done {
+            self.finish_move(locked);
+        }
+        // Trancar fixa o lugar de agora; o widget sempre abre destrancado, mas no lugar em que foi trancado.
+        if locked != self.was_locked {
+            self.was_locked = locked;
+            if locked && let Some(r) = chrome::window_rect(WIDGET_TITLE) {
+                self.remember_place([r[0], r[1]]);
+            }
+        }
+        if acts.toggle_lock {
+            self.prefs.locked = !self.prefs.locked;
+            self.prefs_changed = true;
         }
         if acts.toggle_list {
             self.widget_list = !self.widget_list;
@@ -799,7 +1010,7 @@ mod tests {
         let mut store = Store::default();
         let id = store.add("Ligar".into(), Some(today));
         store.dirty = false;
-        let mut view = MonitorView::new(crate::model::Settings::default().widget_prefs());
+        let mut view = MonitorView::new(crate::model::Settings::default().widget_prefs(), None);
         view.toggle_task(&mut store, id);
         assert!(store.tasks[0].done && store.dirty);
         assert_eq!(view.tasks_win.done.len(), 1);
@@ -818,8 +1029,65 @@ mod tests {
     }
 
     #[test]
+    fn widget_abre_destrancado_no_lugar_em_que_foi_trancado() {
+        let medio = WidgetFormat::Medio;
+        let place = WidgetPlace { x: -1500, y: 120, w: 410.0, h: 230.0, format: medio };
+        let prefs = WidgetPrefs { locked: true, ..crate::model::Settings::default().widget_prefs() };
+        let mut view = MonitorView::new(prefs, Some(place));
+        assert!(!view.prefs.locked, "mesmo que alguém peça trancado, ele nasce destrancado");
+        view.open_widget();
+        assert!(view.widget_on() && !view.prefs.locked);
+        assert_eq!((view.widget_w, view.start_h), (410.0, Some(230.0)), "volta ao tamanho de antes");
+        // Fechado e aberto de novo (a trava de agora não vale para a próxima vez).
+        view.prefs.locked = true;
+        view.closing = true;
+        view.widget = false;
+        view.closing = false;
+        view.open_widget();
+        assert!(!view.prefs.locked);
+        // Trancado num formato, aberto em outro: só a posição vale, o tamanho é o do formato.
+        let mut view = MonitorView::new(WidgetPrefs { format: WidgetFormat::Grande, ..prefs }, Some(place));
+        view.open_widget();
+        assert_eq!(view.start_h, None);
+        assert_eq!(view.widget_w, format_size(WidgetFormat::Grande).x);
+        // Sem lugar gravado, nada muda.
+        let mut view = MonitorView::new(prefs, None);
+        view.open_widget();
+        assert_eq!((view.widget_w, view.start_h), (format_size(medio).x, None));
+    }
+
+    #[test]
+    fn trancar_guarda_o_lugar_para_gravar() {
+        let mut view = MonitorView::new(crate::model::Settings::default().widget_prefs(), None);
+        view.widget_size = vec2(340.0, 190.0);
+        assert_eq!(view.take_place_change(), None);
+        view.remember_place([-1700, 40]);
+        let place = view.take_place_change().expect("lugar novo para gravar");
+        assert_eq!(place, WidgetPlace { x: -1700, y: 40, w: 340.0, h: 190.0, format: WidgetFormat::Medio });
+        assert_eq!(view.take_place_change(), None, "só uma vez");
+        // O lugar guardado manda na próxima abertura, sem passar da tela (monitor à esquerda desligado).
+        let at = view.wanted_position([340, 190]);
+        assert!(at[0] >= -1700, "dentro da área de trabalho, que no máximo é a do monitor que sobrou");
+    }
+
+    #[test]
+    fn fada_do_cabecalho_abre_e_fecha_o_widget() {
+        let mut view = MonitorView::new(crate::model::Settings::default().widget_prefs(), None);
+        assert!(!view.widget_on());
+        view.toggle_widget();
+        assert!(view.widget_on(), "abre");
+        assert!(view.take_opened(), "e o app vai para a bandeja");
+        view.toggle_widget();
+        assert!(!view.widget_on() && view.closing, "fecha esmaecendo");
+        // Clicada de novo no meio do esmaecer, ela cancela o fechamento (sem mandar o app para a bandeja outra vez).
+        view.toggle_widget();
+        assert!(view.widget_on());
+        assert!(!view.take_opened());
+    }
+
+    #[test]
     fn formato_novo_volta_ao_tamanho_padrao_e_opacidade_tem_limite() {
-        let mut view = MonitorView::new(crate::model::Settings::default().widget_prefs());
+        let mut view = MonitorView::new(crate::model::Settings::default().widget_prefs(), None);
         let mut prefs = view.prefs;
         prefs.format = WidgetFormat::Barra;
         prefs.opacity = 0.0;

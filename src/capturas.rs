@@ -208,11 +208,11 @@ fn widget_em_todos_os_formatos() {
     theme::apply(&ctx);
     let mut atlas = Atlas::new();
     let mut settings = Settings::default();
-    settings.widget_locked = true;
     settings.widget_opacity = 0.5;
     settings.normalize();
     let mut app = App::with(sample().0, settings, None);
     app.monitor.open_widget();
+    app.monitor.set_locked(true);
     capture(&mut app, &ctx, &mut atlas, "widget_trancado_meio_transparente", w, h, &mut clock);
 }
 

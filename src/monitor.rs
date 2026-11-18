@@ -11,7 +11,7 @@ use crate::brand::{self, PANEL_TITLE, WIDGET_TITLE};
 use crate::theme::{self, ACCENT, BG};
 use crate::tracker::{AppRow, Icon, Tracker};
 use crate::chrome;
-use crate::model::{OPACITY_RANGE, WidgetFormat, WidgetPrefs};
+use crate::model::{OPACITY_RANGE, WidgetFormat, WidgetPlace, WidgetPrefs};
 
 #[derive(PartialEq, Clone, Copy)]
 enum Range {
@@ -39,8 +39,10 @@ const MIN_SIZE: egui::Vec2 = vec2(90.0, 24.0);
 /// Tamanho de partida de cada formato do widget, em pontos (largura, altura).
 pub fn format_size(format: WidgetFormat) -> egui::Vec2 {
     match format {
-        WidgetFormat::Barra => vec2(150.0, 30.0),
-        WidgetFormat::Pequeno => vec2(320.0, 56.0),
+        // Larga o bastante para o ícone e o cronômetro ficarem no meio, com o cadeado e a seta dos lados.
+        WidgetFormat::Barra => vec2(180.0, 30.0),
+        // Com o cadeado, a seta e o fechar à direita, 350 ainda deixa lugar para o nome da maioria dos programas.
+        WidgetFormat::Pequeno => vec2(350.0, 56.0),
         WidgetFormat::Medio => vec2(340.0, 190.0),
         WidgetFormat::Grande => vec2(460.0, 340.0),
     }
@@ -56,10 +58,28 @@ pub struct MonitorView {
     widget_w: f32,
     /// Tamanho com que a janela do widget foi criada.
     widget_start: egui::Vec2,
-    /// Formato, trava de tamanho e opacidade do widget.
+    /// Formato, trava e opacidade do widget. A trava vale só para o widget aberto: ele sempre abre destrancado.
     prefs: WidgetPrefs,
     /// As preferências mudaram e precisam ser gravadas.
     prefs_changed: bool,
+    /// Onde o widget ficou da última vez que foi trancado (vem das preferências e volta para elas).
+    place: Option<WidgetPlace>,
+    /// O lugar mudou e precisa ser gravado.
+    place_changed: bool,
+    /// Onde a pessoa deixou o widget da última vez nesta sessão (canto superior esquerdo, em pixels da tela).
+    last_pos: Option<[i32; 2]>,
+    /// Posição inicial da janela do widget, em pontos (fica fixa: o egui reenvia a posição quando o valor muda).
+    start_pos: egui::Pos2,
+    /// Altura com que a janela abre, quando é a de um lugar trancado (senão vale a do formato).
+    start_h: Option<f32>,
+    /// Tamanho atual da janela do widget, em pontos.
+    widget_size: egui::Vec2,
+    /// A janela já foi levada ao lugar dela.
+    placed: bool,
+    /// O widget estava trancado no quadro anterior (para guardar o lugar na hora em que ele é trancado).
+    was_locked: bool,
+    /// O mouse está arrastando ou redimensionando o widget.
+    gesture: widget::Gesture,
     /// O formato mudou: a janela volta ao tamanho padrão dele no próximo quadro.
     resize_now: bool,
     /// Opacidade do quadro atual (esmaecer de abrir e fechar já incluído), para as janelas que acompanham o widget.
@@ -307,7 +327,7 @@ pub fn clock(secs: u64) -> String {
 }
 
 impl MonitorView {
-    pub fn new(prefs: WidgetPrefs) -> Self {
+    pub fn new(prefs: WidgetPrefs, place: Option<WidgetPlace>) -> Self {
         let start = format_size(prefs.format);
         Self {
             range: Range::Hoje,
@@ -316,8 +336,17 @@ impl MonitorView {
             widget_h: 0.0,
             widget_w: start.x,
             widget_start: start,
-            prefs,
+            prefs: WidgetPrefs { locked: false, ..prefs },
             prefs_changed: false,
+            place,
+            place_changed: false,
+            last_pos: None,
+            start_pos: egui::Pos2::ZERO,
+            start_h: None,
+            widget_size: start,
+            placed: false,
+            was_locked: false,
+            gesture: widget::Gesture::default(),
             resize_now: false,
             fade: 1.0,
             tasks_open: false,
@@ -342,18 +371,48 @@ impl MonitorView {
         std::mem::take(&mut self.just_opened)
     }
 
-    #[cfg(test)]
+    /// O widget está aberto (e não se fechando).
     pub fn widget_on(&self) -> bool {
         self.widget && !self.closing
     }
 
-    /// Abre o widget (a janela principal acabou de sair de cena).
+    /// Tranca ou destranca, como o cadeado do widget (para as capturas de tela do teste).
+    #[cfg(test)]
+    pub fn set_locked(&mut self, locked: bool) {
+        self.prefs.locked = locked;
+    }
+
+    /// Abre o widget (a janela principal acabou de sair de cena). Ele sempre abre destrancado, no lugar em que
+    /// foi trancado da última vez, se houver, e com o tamanho que tinha.
     pub fn open_widget(&mut self) {
         if !self.widget {
             self.widget = true;
             self.widget_fresh = true;
+            self.prefs.locked = false;
+            self.was_locked = false;
+            self.start_h = None;
+            if let Some(p) = self.place.filter(|p| p.format == self.prefs.format) {
+                self.widget_w = p.w.max(MIN_SIZE.x);
+                self.start_h = Some(p.h.max(MIN_SIZE.y));
+            }
         }
         self.closing = false;
+    }
+
+    /// A fada do cabeçalho abre e fecha o widget. Ao abrir, a janela principal vai para a bandeja.
+    pub fn toggle_widget(&mut self) {
+        if self.widget_on() {
+            self.closing = true;
+        } else {
+            let cold = !self.widget;
+            self.open_widget();
+            self.just_opened |= cold;
+        }
+    }
+
+    /// O lugar do widget, se acabou de mudar (para gravar).
+    pub fn take_place_change(&mut self) -> Option<WidgetPlace> {
+        std::mem::take(&mut self.place_changed).then_some(self.place).flatten()
     }
 
     /// Fecha o widget esmaecendo (a janela principal voltou).
@@ -409,17 +468,6 @@ impl MonitorView {
                 ui.selectable_value(&mut self.range, Range::Hoje, "Hoje");
                 ui.selectable_value(&mut self.range, Range::Semana, "7 dias");
                 ui.selectable_value(&mut self.range, Range::Mes, "30 dias");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if fairy_button(ui, self.widget && !self.closing) {
-                        if self.widget && !self.closing {
-                            self.closing = true;
-                        } else if !self.widget {
-                            self.widget = true;
-                            self.widget_fresh = true;
-                            self.just_opened = true;
-                        }
-                    }
-                });
             });
             ui.add_space(4.0);
             self.status_banner(ui, &report.now);
@@ -676,7 +724,8 @@ impl MonitorView {
                             }
                         }
                     });
-                    ui.checkbox(&mut prefs.locked, "Trancar o tamanho").on_hover_text("Não deixa redimensionar o widget com o mouse");
+                    ui.checkbox(&mut prefs.locked, "Trancar posição e tamanho")
+                        .on_hover_text("Fixa o widget onde está, e ele volta a esse lugar ao abrir. O botão do meio do mouse ainda o arrasta.");
                     section(ui, "Opacidade");
                     let mut percent = (prefs.opacity * 100.0).round();
                     ui.spacing_mut().slider_width = PANEL_W - 28.0 - 64.0;
@@ -763,18 +812,18 @@ fn chart(ui: &mut egui::Ui, days: &[(chrono::NaiveDate, u64)]) {
     }
 }
 
-/// Botão da fadinha: as asas batem quando o mouse passa por cima. Retorna `true` ao clicar.
-fn fairy_button(ui: &mut egui::Ui, active: bool) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(vec2(64.0, 44.0), Sense::click());
+/// A fada do cabeçalho do app: abre e fecha o widget. Passando o mouse, ela bate as asas e voa em oito, subindo
+/// e descendo. `active`: o widget está aberto.
+pub fn header_fairy(ui: &mut egui::Ui, active: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(34.0, 32.0), Sense::click());
     let amp = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.18);
     let time = ui.input(|i| i.time) as f32;
     let flap = (time * 13.0).sin() * amp;
     if amp > 0.0 {
         ui.ctx().request_repaint();
     }
-    let glow = if active { 1.0 } else { amp };
-    // Em hover ela voa em oito, subindo e descendo, enquanto bate as asas.
-    let sway = vec2((time * 5.0).sin() * 5.0, (time * 10.0).sin() * 4.0) * amp;
-    crate::fairy::draw(ui.painter(), rect.center() + vec2(0.0, 2.0) + sway, 40.0 + 6.0 * amp, flap, glow);
-    resp.on_hover_text(if active { "Fechar widget" } else { "Abrir widget" }).clicked()
+    let glow = if active { 1.0 } else { 0.3 + 0.7 * amp };
+    let sway = vec2((time * 5.0).sin() * 3.75, (time * 10.0).sin() * 3.0) * amp;
+    crate::fairy::draw(ui.painter(), rect.center() + sway, 30.0 + 4.5 * amp, flap, glow);
+    resp.on_hover_text(if active { "Fechar widget" } else { "Abrir widget" })
 }

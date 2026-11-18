@@ -512,6 +512,30 @@ mod tests {
     }
 
     #[test]
+    fn widget_sempre_abre_destrancado_e_lembra_do_lugar() {
+        // Arquivo das versões 0.9.7 a 0.9.9, que gravavam a trava: ela é ignorada e o resto continua valendo.
+        let mut s: Settings = serde_json::from_str("{\"widget_locked\": true, \"widget_opacity\": 0.6}").unwrap();
+        s.normalize();
+        assert!(!s.widget_prefs().locked);
+        assert!((s.widget_opacity - 0.6).abs() < 1e-6);
+        assert_eq!(s.widget_place, None);
+        // O lugar de quando foi trancado volta igual, inclusive com coordenadas negativas (monitor à esquerda).
+        let place = WidgetPlace { x: -1700, y: 40, w: 340.0, h: 190.0, format: WidgetFormat::Medio };
+        s.widget_place = Some(place);
+        s.set_widget_prefs(WidgetPrefs { locked: true, ..s.widget_prefs() });
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("widget_locked"), "a trava não é gravada");
+        let mut back: Settings = serde_json::from_str(&json).unwrap();
+        back.normalize();
+        assert_eq!(back.widget_place, Some(place));
+        assert!(!back.widget_prefs().locked);
+        // Tamanho estragado no arquivo: sem lugar, em vez de uma janela de tamanho zero.
+        let mut bad: Settings = serde_json::from_str("{\"widget_place\": {\"x\": 5, \"y\": 5, \"w\": 0.0, \"h\": 190.0, \"format\": \"Medio\"}}").unwrap();
+        bad.normalize();
+        assert_eq!(bad.widget_place, None);
+    }
+
+    #[test]
     fn desfazer_devolve_a_tarefa_ao_lugar() {
         let mut s = Store::default();
         let ids: Vec<u64> = ["a", "b", "c"].iter().map(|t| s.add((*t).into(), None)).collect();
@@ -594,14 +618,26 @@ impl WidgetFormat {
     }
 }
 
-/// Escolhas do widget que ficam gravadas: formato, tamanho trancado e opacidade.
+/// Escolhas do widget: formato, trava e opacidade. Só o formato e a opacidade ficam gravados; a trava vale para
+/// o widget aberto no momento (ele sempre abre destrancado, e o lugar dele fica em [`WidgetPlace`]).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct WidgetPrefs {
     pub format: WidgetFormat,
-    /// Trancado: não dá para redimensionar a janela do widget.
+    /// Trancado: o widget não muda de posição nem de tamanho com o mouse (só com o botão do meio, que o move).
     pub locked: bool,
     /// De 0.3 (bem transparente) a 1.0 (opaco).
     pub opacity: f32,
+}
+
+/// Onde o widget ficou quando foi trancado: o canto superior esquerdo em pixels da tela (negativo num monitor à
+/// esquerda ou acima do principal) e o tamanho em pontos. Vale só para o formato em que foi trancado.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub struct WidgetPlace {
+    pub x: i32,
+    pub y: i32,
+    pub w: f32,
+    pub h: f32,
+    pub format: WidgetFormat,
 }
 
 /// Opacidade mínima do widget: abaixo disso ele some da tela e ninguém acha de novo.
@@ -623,10 +659,10 @@ pub struct Settings {
     pub widget_small: bool,
     /// Formato do widget; `None` em arquivos antigos (vale então o campo `widget_small`).
     pub widget_format: Option<WidgetFormat>,
-    /// Widget com o tamanho trancado.
-    pub widget_locked: bool,
     /// Opacidade do widget (0.3 a 1.0).
     pub widget_opacity: f32,
+    /// Posição e tamanho do widget da última vez que foi trancado; `None` enquanto ninguém o trancou.
+    pub widget_place: Option<WidgetPlace>,
     /// Pasta dos backups (normalmente sincronizada com a nuvem). `None` = backup desligado.
     pub backup_dir: Option<PathBuf>,
     /// Quando o último backup deu certo.
@@ -641,8 +677,8 @@ impl Default for Settings {
             tray_notice_shown: false,
             widget_small: false,
             widget_format: None,
-            widget_locked: false,
             widget_opacity: 1.0,
+            widget_place: None,
             backup_dir: None,
             last_backup: None,
         }
@@ -665,15 +701,18 @@ impl Settings {
             self.widget_format = Some(if self.widget_small { WidgetFormat::Pequeno } else { WidgetFormat::Medio });
         }
         self.widget_small = false;
+        // Um lugar com número estragado (arquivo editado à mão) vale como nenhum.
+        self.widget_place = self.widget_place.filter(|p| p.w.is_finite() && p.h.is_finite() && p.w >= 1.0 && p.h >= 1.0);
     }
 
+    /// As escolhas do widget. Ele sempre abre destrancado, venha o arquivo de onde vier (as versões 0.9.7 a 0.9.9
+    /// gravavam `widget_locked`; o campo antigo é ignorado).
     pub fn widget_prefs(&self) -> WidgetPrefs {
-        WidgetPrefs { format: self.widget_format.unwrap_or_default(), locked: self.widget_locked, opacity: self.widget_opacity }
+        WidgetPrefs { format: self.widget_format.unwrap_or_default(), locked: false, opacity: self.widget_opacity }
     }
 
     pub fn set_widget_prefs(&mut self, prefs: WidgetPrefs) {
         self.widget_format = Some(prefs.format);
-        self.widget_locked = prefs.locked;
         self.widget_opacity = prefs.opacity;
     }
 

@@ -105,7 +105,7 @@ impl App {
             store,
             tasks: TasksView::new(),
             planner: Planner::new(),
-            monitor: MonitorView::new(settings.widget_prefs()),
+            monitor: MonitorView::new(settings.widget_prefs(), settings.widget_place),
             tracker: Tracker::start(),
             updater: Updater::default(),
             tray: None,
@@ -265,11 +265,12 @@ impl App {
         .on_hover_text("Tamanho da interface");
     }
 
-    /// A fada do cabeçalho, sem o fundo do ícone; só cresce um pouco quando o mouse passa por cima.
-    fn logo_ui(ui: &mut egui::Ui) {
-        let (rect, resp) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::hover());
-        let grow = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.15);
-        fairy::draw(ui.painter(), rect.center(), 30.0 * (1.0 + 0.25 * grow), 0.0, 0.3 + 0.7 * grow);
+    /// A fada do cabeçalho, sem o fundo do ícone: um clique abre ou fecha o widget (o app vai para a bandeja ao
+    /// abrir). Passando o mouse ela bate as asas e voa em oito.
+    fn logo_ui(&mut self, ui: &mut egui::Ui) {
+        if monitor::header_fairy(ui, self.monitor.widget_on()).clicked() {
+            self.monitor.toggle_widget();
+        }
     }
 
     /// O widget acompanha a janela principal: abre quando ela sai de cena, por qualquer caminho
@@ -297,6 +298,11 @@ impl App {
         let time = ctx.input(|i| i.time);
         if let Some(prefs) = self.monitor.take_prefs_change() {
             self.settings.set_widget_prefs(prefs);
+            self.prefs_dirty_at = Some(time);
+        }
+        // O lugar do widget trancado também fica gravado, para ele voltar a ele depois de reiniciar o app.
+        if let Some(place) = self.monitor.take_place_change() {
+            self.settings.widget_place = Some(place);
             self.prefs_dirty_at = Some(time);
         }
         if let Some(at) = self.prefs_dirty_at {
@@ -474,7 +480,7 @@ impl App {
             }
             ui.horizontal_centered(|ui| {
                 ui.add_space(14.0);
-                Self::logo_ui(ui);
+                self.logo_ui(ui);
                 ui.add(egui::Label::new(egui::RichText::new(brand::NAME).strong().size(16.0)).selectable(false));
                 ui.add_space(14.0);
                 if inline {
