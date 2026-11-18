@@ -175,7 +175,7 @@ fn strip(ui: &mut egui::Ui, full: egui::Rect, look: &Look, opts: &StripOpts, act
         spare -= BTN_W + GAP;
     }
     // Na barra a seta das tarefas e o cadeado não têm lugar fixo: aparecem por cima, só com o mouse sobre ela
-    // (destrancada, o cadeado aberto fica sempre à vista).
+    // (a barra destrancada se mostra pelo fio azul da borda).
     let overlay_tasks = opts.tasks && !opts.name;
     let show_tasks = opts.tasks && !overlay_tasks && spare >= BTN_W + GAP;
     if show_tasks {
@@ -234,8 +234,9 @@ fn strip(ui: &mut egui::Ui, full: egui::Rect, look: &Look, opts: &StripOpts, act
                     x0 = (limit - total).max(zone.left());
                 }
             }
-            // Na barra o cadeado fica à esquerda do par, se houver lugar: o par não anda quando ele aparece.
-            if overlay_tasks && (look.hover || !look.locked) && x0 - full.left() >= BTN_W + 6.0 {
+            // Na barra (só ícone e horário) o cadeado, como a seta, aparece só com o mouse por cima, à esquerda
+            // do par, se houver lugar: o par não anda quando ele aparece.
+            if overlay_tasks && look.hover && x0 - full.left() >= BTN_W + 6.0 {
                 if lock_button(ui, egui::pos2(full.left() + 4.0 + BTN_W / 2.0, cy), look.locked).clicked() {
                     acts.toggle_lock = true;
                 }
