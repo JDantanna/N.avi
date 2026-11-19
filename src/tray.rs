@@ -66,7 +66,8 @@ pub fn is_hidden() -> bool {
         return false;
     }
     let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-    unsafe { GetWindowRect(hwnd, &mut r) != 0 && IsIconic(hwnd) == 0 } && r.left <= OFFSCREEN / 2
+    let known = unsafe { GetWindowRect(hwnd, &mut r) != 0 && IsIconic(hwnd) == 0 };
+    known && r.left <= OFFSCREEN / 2
 }
 
 /// Esconde a janela principal e põe o ícone na bandeja.

@@ -61,7 +61,7 @@ pub fn window_button(ui: &mut egui::Ui, glyph: Glyph) -> Response {
 /// Id fixo de um botão da barra da janela principal (minimizar, maximizar, fechar), para ele poder ser achado
 /// de fora da barra, como nos testes que clicam nele.
 pub fn main_button_id(glyph: Glyph) -> egui::Id {
-    egui::Id::new(("botao_da_janela_principal", glyph as u8))
+    egui::Id::unique(("botao_da_janela_principal", glyph as u8))
 }
 
 /// Botão de ícone desenhado em código. `spin` gira o ícone (em radianos; só o `Refresh`).
