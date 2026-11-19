@@ -312,13 +312,12 @@ fn tag_chip(ui: &mut egui::Ui, tag: &str, rgb: [u8; 3], on: bool, suffix: &str) 
         ui.end_row();
     }
     let mode = if too_wide { egui::TextWrapMode::Truncate } else { egui::TextWrapMode::Extend };
-    // Compacta: pouco respiro interno e altura mínima baixa, mas ainda legível.
-    let resp = ui
-        .scope(|ui| {
-            ui.spacing_mut().button_padding = vec2(5.0, 0.0);
-            ui.add(egui::Button::new(text).wrap_mode(mode).fill(fill).stroke(Stroke::new(1.0, c.gamma_multiply(0.85))).corner_radius(8).min_size(vec2(0.0, 16.0)))
-        })
-        .inner;
+    // Compacta: pouco respiro interno e altura mínima baixa, mas ainda legível. Sem `ui.scope`: um widget dentro
+    // de um escopo nunca muda de linha (o escopo é que é medido), e era isso que o deixava espremido.
+    let padding = ui.spacing().button_padding;
+    ui.spacing_mut().button_padding = vec2(5.0, 0.0);
+    let resp = ui.add(egui::Button::new(text).wrap_mode(mode).fill(fill).stroke(Stroke::new(1.0, c.gamma_multiply(0.85))).corner_radius(8).min_size(vec2(0.0, 16.0)));
+    ui.spacing_mut().button_padding = padding;
     if too_wide { resp.on_hover_text(label) } else { resp }
 }
 
