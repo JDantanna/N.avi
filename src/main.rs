@@ -736,8 +736,10 @@ mod tests {
                 assert!(asked_to_minimize(&out), "minimizar em {w}x{h} ({zoom}), aba {}", tab as u8);
                 assert!(!app.ask_close);
 
-                let out = click(&mut app, &ctx, size, &mut clock, chrome::main_button_id(chrome::Glyph::Close));
+                click(&mut app, &ctx, size, &mut clock, chrome::main_button_id(chrome::Glyph::Close));
                 assert!(app.ask_close, "fechar em {w}x{h} ({zoom}), aba {}", tab as u8);
+                // A janela da pergunta mede o próprio tamanho no primeiro quadro e aparece no seguinte.
+                let out = frame(&mut app, &ctx, size, &mut clock, false, vec![]);
                 assert!(shows(&out, "Quer mesmo sair?"), "a pergunta aparece");
                 // Esc cancela e tudo volta ao normal.
                 let esc = Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::default() };
@@ -771,8 +773,13 @@ mod tests {
             frame(&mut app, &ctx, size, &mut clock, false, vec![]);
         }
         assert!(!app.monitor.widget_on(), "de volta, o widget fecha");
-        let out = click(&mut app, &ctx, size, &mut clock, chrome::main_button_id(chrome::Glyph::Close));
-        assert!(app.ask_close && shows(&out, "Quer mesmo sair?"));
+        click(&mut app, &ctx, size, &mut clock, chrome::main_button_id(chrome::Glyph::Close));
+        assert!(app.ask_close);
+        let out = frame(&mut app, &ctx, size, &mut clock, false, vec![]);
+        assert!(shows(&out, "Quer mesmo sair?"));
+        let esc = Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::default() };
+        frame(&mut app, &ctx, size, &mut clock, false, vec![esc]);
+        assert!(!app.ask_close);
         let out = click(&mut app, &ctx, size, &mut clock, chrome::main_button_id(chrome::Glyph::Minimize));
         assert!(asked_to_minimize(&out));
     }
