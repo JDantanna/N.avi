@@ -135,20 +135,52 @@ fn count(store: &Store, filter: Filter, today: NaiveDate, now: NaiveDateTime) ->
     store.tasks.iter().filter(|t| (filter == Filter::Concluidas || !t.done) && in_filter(filter, group_of(t, today, now), t, today)).count()
 }
 
-/// Texto de data e hora à direita da linha: só o que a seção ainda não diz.
-fn when_text(t: &Task, group: Group) -> String {
+/// Data e hora à direita da linha, cada uma à parte: só o que a seção ainda não diz (em "Hoje" e "Amanhã" a
+/// data é a da seção).
+fn when_parts(t: &Task, group: Group) -> (Option<String>, Option<String>) {
     let time = t.time.map(|h| h.format("%H:%M").to_string());
     let day = match (group, t.date) {
         (Group::Hoje | Group::Amanha, _) | (_, None) => None,
         (Group::Semana, Some(d)) => Some(DIAS_CURTOS[d.weekday().num_days_from_monday() as usize].to_owned()),
         (_, Some(d)) => Some(d.format("%d/%m").to_string()),
     };
-    match (day, time) {
-        (Some(d), Some(h)) => format!("{d} {h}"),
-        (Some(d), None) => d,
-        (None, Some(h)) => h,
-        (None, None) => String::new(),
+    (day, time)
+}
+
+/// Calendário miúdo (a legenda da data), desenhado em `c`.
+fn paint_mini_calendar(p: &egui::Painter, c: egui::Pos2, col: Color32) {
+    let st = Stroke::new(1.0, col);
+    p.rect_stroke(Rect::from_center_size(c + vec2(0.0, 0.8), vec2(9.0, 8.0)), 1.5, st, egui::StrokeKind::Middle);
+    p.line_segment([c + vec2(-4.5, -1.2), c + vec2(4.5, -1.2)], st);
+    for x in [-2.4, 2.4] {
+        p.line_segment([c + vec2(x, -4.2), c + vec2(x, -2.6)], st);
     }
+}
+
+/// Relógio miúdo (a legenda da hora), desenhado em `c`.
+fn paint_mini_clock(p: &egui::Painter, c: egui::Pos2, col: Color32) {
+    let st = Stroke::new(1.0, col);
+    p.circle_stroke(c, 4.6, st);
+    p.line_segment([c, c + vec2(0.0, -2.7)], st);
+    p.line_segment([c, c + vec2(2.0, 1.2)], st);
+}
+
+/// Largura do ícone das linhas de data e hora e o espaço depois dele.
+const WHEN_ICON_W: f32 = 11.0;
+const WHEN_ICON_GAP: f32 = 4.0;
+
+/// Uma linha do canto direito (ícone e texto, alinhados à direita em `right`). Devolve a largura que ocupou.
+fn paint_when_line(p: &egui::Painter, right: f32, y: f32, text: String, font: FontId, color: Color32, hour: bool) -> f32 {
+    let galley = p.layout_no_wrap(text, font, color);
+    let (w, h) = (galley.size().x, galley.size().y);
+    p.galley(pos2(right - w, y - h / 2.0), galley, color);
+    let icon = pos2(right - w - WHEN_ICON_GAP - WHEN_ICON_W / 2.0, y);
+    if hour {
+        paint_mini_clock(p, icon, color);
+    } else {
+        paint_mini_calendar(p, icon, color);
+    }
+    w + WHEN_ICON_GAP + WHEN_ICON_W
 }
 
 fn date_label(d: NaiveDate, today: NaiveDate) -> String {
@@ -269,15 +301,29 @@ fn parse_quick(text: &str, today: NaiveDate) -> Quick {
 /// Etiqueta colorida de uma tag; `on` a destaca.
 fn tag_chip(ui: &mut egui::Ui, tag: &str, rgb: [u8; 3], on: bool, suffix: &str) -> egui::Response {
     let c = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-    let text = RichText::new(format!("#{tag}{suffix}")).size(11.0).color(Color32::WHITE);
+    let label = format!("#{tag}{suffix}");
+    let text = RichText::new(label.clone()).size(11.0).color(Color32::WHITE);
     let fill = c.gamma_multiply(if on { 0.75 } else { 0.28 });
+    // O texto da etiqueta nunca quebra em linhas: se ela não cabe no que sobra da linha, desce inteira para a
+    // seguinte. Só uma etiqueta mais larga que a linha toda é cortada (e mostra o nome inteiro ao passar o mouse).
+    let natural = ui.painter().layout_no_wrap(label.clone(), egui::FontId::proportional(11.0), Color32::WHITE).size().x + CHIP_EXTRA_W;
+    let too_wide = natural > ui.max_rect().width();
+    if too_wide {
+        ui.end_row();
+    }
+    let mode = if too_wide { egui::TextWrapMode::Truncate } else { egui::TextWrapMode::Extend };
     // Compacta: pouco respiro interno e altura mínima baixa, mas ainda legível.
-    ui.scope(|ui| {
-        ui.spacing_mut().button_padding = vec2(5.0, 0.0);
-        ui.add(egui::Button::new(text).fill(fill).stroke(Stroke::new(1.0, c.gamma_multiply(0.85))).corner_radius(8).min_size(vec2(0.0, 16.0)))
-    })
-    .inner
+    let resp = ui
+        .scope(|ui| {
+            ui.spacing_mut().button_padding = vec2(5.0, 0.0);
+            ui.add(egui::Button::new(text).wrap_mode(mode).fill(fill).stroke(Stroke::new(1.0, c.gamma_multiply(0.85))).corner_radius(8).min_size(vec2(0.0, 16.0)))
+        })
+        .inner;
+    if too_wide { resp.on_hover_text(label) } else { resp }
 }
+
+/// O que a etiqueta tem além do texto: o respiro dos dois lados (5 + 5) e a borda.
+const CHIP_EXTRA_W: f32 = 12.0;
 
 /// Linhas de tags lado a lado, com pouco espaço entre elas.
 fn tight(ui: &mut egui::Ui) {
@@ -887,14 +933,28 @@ impl TasksView {
                 acts.push(Act::Notes(id));
             }
         }
-        let when = when_text(t, group);
-        if !when.is_empty() {
-            let color = if overdue { OVERDUE_TEXT } else { DIM };
-            let galley = p.layout_no_wrap(when, FontId::proportional(12.5), color);
-            right -= galley.size().x + 2.0;
-            let h = galley.size().y;
-            p.galley(pos2(right, title_y - h / 2.0), galley, color);
-            right -= 8.0;
+        // Data em cima e hora embaixo, cada uma com a sua legenda (calendário e relógio) e o seu destaque: a data
+        // em cinza, a hora mais clara e de números alinhados. Sozinha, qualquer uma fica na linha do título, no mesmo
+        // lugar à direita de todas as outras linhas. Atrasada, as duas ficam vermelhas.
+        let (day, hour) = when_parts(t, group);
+        let both = day.is_some() && hour.is_some();
+        let (day_y, hour_y) = match (both, has_meta) {
+            // Em cima e embaixo ficam na linha do título e na dos detalhes (tags, itens, avisos).
+            (true, true) => (title_y, title_y + 18.0),
+            (true, false) => (title_y - 8.0, title_y + 8.0),
+            (false, _) => (title_y, title_y),
+        };
+        let day_color = if overdue { OVERDUE_TEXT.gamma_multiply(0.78) } else { DIM };
+        let hour_color = if overdue { OVERDUE_TEXT } else { Color32::from_gray(208) };
+        let mut block = 0.0f32;
+        if let Some(text) = day {
+            block = block.max(paint_when_line(p, right, day_y, text, FontId::proportional(12.0), day_color, false));
+        }
+        if let Some(text) = hour {
+            block = block.max(paint_when_line(p, right, hour_y, text, FontId::monospace(12.0), hour_color, true));
+        }
+        if block > 0.0 {
+            right -= block + 10.0;
         }
 
         let (color, underline, strike) = if t.done {
@@ -1606,6 +1666,70 @@ mod tests {
         assert_eq!(parse_quick("Comprar 3 itens", today).time, None);
         assert_eq!(parse_quick("Sala 25:00", today).time, None);
         assert_eq!(parse_quick("Fração 31/02", today).date, None);
+    }
+
+    #[test]
+    fn data_e_hora_da_linha_vao_cada_uma_no_seu_lugar() {
+        let mut store = Store::default();
+        let id = store.add("x".into(), Some(dia(11, 30)));
+        let mut task = store.tasks.iter().find(|t| t.id == id).unwrap().clone();
+        let t = &mut task;
+        // Sem hora: só a data.
+        assert_eq!(when_parts(t, Group::Depois), (Some("30/11".to_owned()), None));
+        t.time = NaiveTime::from_hms_opt(9, 5, 0);
+        assert_eq!(when_parts(t, Group::Depois), (Some("30/11".to_owned()), Some("09:05".to_owned())));
+        // Na seção da semana a data vira o dia da semana (30/11/2026 é uma segunda-feira).
+        assert_eq!(when_parts(t, Group::Semana).0.as_deref(), Some("seg"));
+        // Em Hoje e Amanhã a seção já diz a data: só a hora.
+        assert_eq!(when_parts(t, Group::Hoje), (None, Some("09:05".to_owned())));
+        assert_eq!(when_parts(t, Group::Amanha), (None, Some("09:05".to_owned())));
+        // Tarefa sem data: só a hora, se houver.
+        t.date = None;
+        assert_eq!(when_parts(t, Group::SemData), (None, Some("09:05".to_owned())));
+        t.time = None;
+        assert_eq!(when_parts(t, Group::SemData), (None, None));
+    }
+
+    /// Desenha as etiquetas numa linha de `width` pontos e devolve onde cada uma ficou.
+    fn chips_in(width: f32, tags: &[&str]) -> Vec<Rect> {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut rects = Vec::new();
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 400.0))), ..Default::default() };
+        let _ = ctx.run_ui(input, |ui| {
+            ui.allocate_ui(vec2(width, 300.0), |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    tight(ui);
+                    for tag in tags {
+                        rects.push(tag_chip(ui, tag, [90, 120, 200], false, "").rect);
+                    }
+                });
+            });
+        });
+        rects
+    }
+
+    #[test]
+    fn etiqueta_que_nao_cabe_desce_inteira_sem_quebrar_o_texto() {
+        let rects = chips_in(300.0, &["Saúde", "Contas", "Cristo", "planejamento-trimestral-2026", "x"]);
+        assert_eq!(rects.len(), 5);
+        // Nenhuma passa da borda, e nenhuma fica alta: o texto não quebra em linhas dentro dela.
+        for r in &rects {
+            assert!(r.right() <= 300.5, "passou da borda: {r:?}");
+            assert!(r.height() < 24.0, "texto quebrado dentro da etiqueta: {r:?}");
+        }
+        // A comprida não coube no que sobrava da primeira linha: desceu inteira, para o começo da linha de baixo.
+        assert!(rects[3].top() > rects[2].top(), "devia estar numa linha abaixo: {:?} {:?}", rects[2], rects[3]);
+        assert!(rects[3].left() < rects[2].left());
+    }
+
+    #[test]
+    fn etiqueta_mais_larga_que_a_linha_toda_e_cortada_na_borda() {
+        let huge = "uma-etiqueta-absurdamente-comprida-que-nao-cabe-nem-sozinha-em-uma-linha-do-painel-de-detalhes";
+        let rects = chips_in(300.0, &["Saúde", huge, "x"]);
+        assert!(rects[1].right() <= 300.5, "passou da borda: {:?}", rects[1]);
+        assert!(rects[1].height() < 24.0);
+        assert!(rects[1].top() > rects[0].top(), "vai para a linha de baixo");
     }
 
     #[test]
