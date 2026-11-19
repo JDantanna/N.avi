@@ -11,7 +11,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, GWL_EXSTYLE, GetWindowLongPtrW, GetWindowPlacement, IsIconic, SW_HIDE, SW_SHOW, SW_SHOWMAXIMIZED,
+    GWL_EXSTYLE, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, IsIconic, SW_HIDE, SW_SHOW, SW_SHOWMAXIMIZED,
     SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowLongPtrW,
     SetWindowPlacement, SetWindowPos, ShowWindow, WINDOWPLACEMENT, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
@@ -52,9 +52,21 @@ pub struct Tray {
     _icon: TrayIcon,
 }
 
+/// A janela principal deste app (só desta thread: nunca a de outro programa com o mesmo título).
 fn main_window() -> HWND {
-    let title: Vec<u16> = brand::MAIN_TITLE.encode_utf16().chain(Some(0)).collect();
-    unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) }
+    crate::chrome::find_window(brand::MAIN_TITLE).unwrap_or(std::ptr::null_mut())
+}
+
+/// A janela principal está escondida fora da tela, como `enter` a deixa (e não só minimizada, que também fica
+/// em -32000 para o Windows). É o que diz se o app está de fato na bandeja, aconteça o que acontecer com o
+/// resto do estado.
+pub fn is_hidden() -> bool {
+    let hwnd = main_window();
+    if hwnd.is_null() {
+        return false;
+    }
+    let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    unsafe { GetWindowRect(hwnd, &mut r) != 0 && IsIconic(hwnd) == 0 } && r.left <= OFFSCREEN / 2
 }
 
 /// Esconde a janela principal e põe o ícone na bandeja.
@@ -157,9 +169,31 @@ pub fn leave() {
                 SetWindowPlacement(hwnd, &placement);
             }
             None => {
+                // Sem lugar guardado (o app perdeu a conta de ter ido para a bandeja): se a janela está fora da
+                // tela, volta para o meio do monitor principal em vez de ser mostrada onde ninguém vê.
+                let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                if GetWindowRect(hwnd, &mut r) != 0
+                    && r.left <= OFFSCREEN / 2
+                    && let Some(work) = crate::chrome::primary_work_area()
+                {
+                    let (w, h) = (r.right - r.left, r.bottom - r.top);
+                    let x = work[0] + ((work[2] - work[0]) - w) / 2;
+                    let y = work[1] + ((work[3] - work[1]) - h) / 2;
+                    SetWindowPos(hwnd, std::ptr::null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                }
                 ShowWindow(hwnd, SW_SHOW);
             }
         }
         SetForegroundWindow(hwnd);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sem_janela_nao_esta_escondida() {
+        // O processo dos testes não tem a janela do app: nada a esconder, nada escondido.
+        assert!(!super::is_hidden());
+        assert!(super::main_window().is_null());
     }
 }

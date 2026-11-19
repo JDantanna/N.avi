@@ -163,6 +163,11 @@ impl App {
     }
 
     fn go_tray(&mut self, ctx: &egui::Context) {
+        // O app só está na bandeja se a janela estiver mesmo escondida. Se o estado se perdeu (a janela voltou
+        // por outro caminho), entra de novo em vez de o botão "não fazer nada".
+        if self.tray.is_some() && !tray::is_hidden() {
+            self.tray = None;
+        }
         if self.tray.is_none() {
             self.tray = tray::enter(ctx, include_bytes!("../assets/icon64.rgba"));
         }
@@ -180,7 +185,8 @@ impl App {
     /// Traz a janela principal de volta (da bandeja ou da barra de tarefas) e a põe em foco.
     /// Da bandeja ela reaparece esmaecendo: primeiro um quadro transparente, só então a janela é mostrada.
     fn restore(&mut self, ctx: &egui::Context) {
-        if self.tray.is_some() {
+        // Escondida fora da tela, a janela precisa do caminho da bandeja mesmo que o estado tenha se perdido.
+        if self.tray.is_some() || tray::is_hidden() {
             self.restore_stage = 1;
             ctx.request_repaint();
         } else {
@@ -199,7 +205,8 @@ impl App {
                 ctx.request_repaint();
             }
             2 => {
-                if self.tray.take().is_some() {
+                let in_tray = self.tray.take().is_some();
+                if in_tray || tray::is_hidden() {
                     tray::leave();
                 }
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -279,7 +286,9 @@ impl App {
     /// (Win+D, o botão da barra de tarefas) também vai para lá, e some da barra de tarefas.
     fn sync_widget(&mut self, ctx: &egui::Context) {
         let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
-        let away = self.tray.is_some() || minimized;
+        // A janela escondida fora da tela conta como fora de cena mesmo sem `tray` (estado perdido): assim o
+        // widget continua à mão, e por ele dá para trazer o app de volta.
+        let away = self.tray.is_some() || minimized || tray::is_hidden();
         if away != self.was_away {
             self.was_away = away;
             if away {
@@ -488,15 +497,17 @@ impl App {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(8.0);
-                    if chrome::window_button(ui, chrome::Glyph::Close).clicked() {
+                    // Os três botões têm id fixo, para os testes clicarem neles.
+                    let button = |ui: &mut egui::Ui, g: chrome::Glyph| chrome::icon_button_id(ui, g, 0.0, Some(chrome::main_button_id(g)));
+                    if button(ui, chrome::Glyph::Close).clicked() {
                         self.ask_close = true;
                     }
                     let g = if maximized { chrome::Glyph::Restore } else { chrome::Glyph::Maximize };
-                    if chrome::window_button(ui, g).clicked() {
+                    if button(ui, g).clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
                     }
                     // Minimizar manda o Navi para a bandeja (o widget abre e o app sai da barra de tarefas).
-                    let min = chrome::window_button(ui, chrome::Glyph::Minimize).on_hover_text("Minimizar para a bandeja");
+                    let min = button(ui, chrome::Glyph::Minimize).on_hover_text("Minimizar para a bandeja");
                     if min.clicked() {
                         self.go_tray(&ctx);
                     }
@@ -642,6 +653,128 @@ impl eframe::App for App {
             Some(prepared) => self.finish_restore(prepared),
             None => self.final_backup(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eframe::egui::{Event, Key, Modifiers, PointerButton, ViewportCommand, ViewportId};
+
+    fn raw(size: egui::Vec2, time: f64, minimized: bool, events: Vec<Event>) -> egui::RawInput {
+        let mut raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            time: Some(time),
+            predicted_dt: 1.0 / 30.0,
+            focused: true,
+            events,
+            ..Default::default()
+        };
+        raw.viewports.insert(ViewportId::ROOT, egui::ViewportInfo { minimized: Some(minimized), ..Default::default() });
+        raw
+    }
+
+    fn frame(app: &mut App, ctx: &egui::Context, size: egui::Vec2, clock: &mut f64, minimized: bool, events: Vec<Event>) -> egui::FullOutput {
+        *clock += 0.1;
+        ctx.run_ui(raw(size, *clock, minimized, events), |ui| app.root(ui))
+    }
+
+    /// Clica, como o mouse, no botão de id `id`: leva o ponteiro até ele, aperta e solta. Devolve o quadro da soltura.
+    fn click(app: &mut App, ctx: &egui::Context, size: egui::Vec2, clock: &mut f64, id: egui::Id) -> egui::FullOutput {
+        let pos = ctx.read_response(id).unwrap_or_else(|| panic!("botão {id:?} na tela")).rect.center();
+        let (button, modifiers) = (PointerButton::Primary, Modifiers::default());
+        frame(app, ctx, size, clock, false, vec![Event::PointerMoved(pos)]);
+        frame(app, ctx, size, clock, false, vec![Event::PointerButton { pos, button, pressed: true, modifiers }]);
+        frame(app, ctx, size, clock, false, vec![Event::PointerButton { pos, button, pressed: false, modifiers }])
+    }
+
+    fn asked_to_minimize(out: &egui::FullOutput) -> bool {
+        out.viewport_output.get(&ViewportId::ROOT).is_some_and(|v| v.commands.iter().any(|c| matches!(c, ViewportCommand::Minimized(true))))
+    }
+
+    fn has_text(shape: &egui::Shape, needle: &str) -> bool {
+        match shape {
+            egui::Shape::Text(t) => t.galley.text().contains(needle),
+            egui::Shape::Vec(v) => v.iter().any(|s| has_text(s, needle)),
+            _ => false,
+        }
+    }
+
+    fn shows(out: &egui::FullOutput, needle: &str) -> bool {
+        out.shapes.iter().any(|s| has_text(&s.shape, needle))
+    }
+
+    /// App com uma tarefa e o painel de detalhes dela aberto.
+    fn app_with_details() -> App {
+        let mut store = Store::default();
+        let id = store.add("Reunião de planejamento do trimestre com a equipe inteira".into(), Some(Local::now().date_naive()));
+        store.dirty = false;
+        let mut app = App::with(store, Settings::default(), None);
+        app.tasks.open(id);
+        app
+    }
+
+    /// Minimizar e fechar precisam responder sempre: com o painel de detalhes aberto, em qualquer aba, em qualquer
+    /// tamanho de janela e escala, e com a janela de backup aberta. Nos testes não há bandeja (`tray::enter`
+    /// devolve `None`), então minimizar vira o pedido `Minimized(true)` ao sistema.
+    #[test]
+    fn minimizar_e_fechar_respondem_com_qualquer_painel_aberto() {
+        for (w, h, zoom) in [(1000.0, 640.0, 1.0), (760.0, 560.0, 1.2), (480.0, 420.0, 1.0)] {
+            let ctx = egui::Context::default();
+            theme::apply(&ctx);
+            ctx.set_zoom_factor(zoom);
+            let size = vec2(w, h);
+            let mut app = app_with_details();
+            let mut clock = 10.0;
+            for tab in [Tab::Tarefas, Tab::Calendario, Tab::Monitoramento, Tab::Tarefas] {
+                app.tab = tab;
+                // O painel de detalhes desliza por 0,16 s: espera a tela assentar.
+                for _ in 0..5 {
+                    frame(&mut app, &ctx, size, &mut clock, false, vec![]);
+                }
+                let out = click(&mut app, &ctx, size, &mut clock, chrome::main_button_id(chrome::Glyph::Minimize));
+                assert!(asked_to_minimize(&out), "minimizar em {w}x{h} ({zoom}), aba {}", tab as u8);
+                assert!(!app.ask_close);
+
+                let out = click(&mut app, &ctx, size, &mut clock, chrome::main_button_id(chrome::Glyph::Close));
+                assert!(app.ask_close, "fechar em {w}x{h} ({zoom}), aba {}", tab as u8);
+                assert!(shows(&out, "Quer mesmo sair?"), "a pergunta aparece");
+                // Esc cancela e tudo volta ao normal.
+                let esc = Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::default() };
+                frame(&mut app, &ctx, size, &mut clock, false, vec![esc]);
+                assert!(!app.ask_close);
+            }
+            // Com a janela de backup aberta no meio da tela, a barra continua respondendo.
+            app.backup.open = true;
+            for _ in 0..3 {
+                frame(&mut app, &ctx, size, &mut clock, false, vec![]);
+            }
+            let out = click(&mut app, &ctx, size, &mut clock, chrome::main_button_id(chrome::Glyph::Minimize));
+            assert!(asked_to_minimize(&out), "minimizar com o backup aberto em {w}x{h}");
+        }
+    }
+
+    /// Depois de ir e voltar (a janela minimizada abre o widget; de volta, ele fecha), os botões seguem respondendo:
+    /// o widget não pode ficar aberto sobre a janela principal.
+    #[test]
+    fn botoes_respondem_depois_de_o_widget_abrir_e_fechar() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let size = vec2(1000.0, 640.0);
+        let mut app = app_with_details();
+        let mut clock = 10.0;
+        for _ in 0..4 {
+            frame(&mut app, &ctx, size, &mut clock, true, vec![]);
+        }
+        assert!(app.monitor.widget_on(), "minimizada, o widget abre");
+        for _ in 0..8 {
+            frame(&mut app, &ctx, size, &mut clock, false, vec![]);
+        }
+        assert!(!app.monitor.widget_on(), "de volta, o widget fecha");
+        let out = click(&mut app, &ctx, size, &mut clock, chrome::main_button_id(chrome::Glyph::Close));
+        assert!(app.ask_close && shows(&out, "Quer mesmo sair?"));
+        let out = click(&mut app, &ctx, size, &mut clock, chrome::main_button_id(chrome::Glyph::Minimize));
+        assert!(asked_to_minimize(&out));
     }
 }
 

@@ -58,9 +58,26 @@ pub fn window_button(ui: &mut egui::Ui, glyph: Glyph) -> Response {
     icon_button(ui, glyph, 0.0)
 }
 
+/// Id fixo de um botão da barra da janela principal (minimizar, maximizar, fechar), para ele poder ser achado
+/// de fora da barra, como nos testes que clicam nele.
+pub fn main_button_id(glyph: Glyph) -> egui::Id {
+    egui::Id::new(("botao_da_janela_principal", glyph as u8))
+}
+
 /// Botão de ícone desenhado em código. `spin` gira o ícone (em radianos; só o `Refresh`).
 pub fn icon_button(ui: &mut egui::Ui, glyph: Glyph, spin: f32) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(36.0, 28.0), Sense::click());
+    icon_button_id(ui, glyph, spin, None)
+}
+
+/// Como [`icon_button`], mas com um id fixo em vez do automático, quando `id` é dado.
+pub fn icon_button_id(ui: &mut egui::Ui, glyph: Glyph, spin: f32, id: Option<egui::Id>) -> Response {
+    let (rect, resp) = match id {
+        Some(id) => {
+            let (rect, _) = ui.allocate_exact_size(vec2(36.0, 28.0), Sense::hover());
+            (rect, ui.interact(rect, id, Sense::click()))
+        }
+        None => ui.allocate_exact_size(vec2(36.0, 28.0), Sense::click()),
+    };
     let hot = resp.hovered();
     let bg = match (hot, glyph) {
         (true, Glyph::Close) => Some(Color32::from_rgb(200, 60, 70)),
@@ -276,15 +293,11 @@ pub fn flatten_window(title: &str) -> bool {
     use windows_sys::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute};
     use windows_sys::Win32::UI::Controls::MARGINS;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+        SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
     };
 
-    let wide: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+    let Some(hwnd) = find_window(title) else { return false };
     unsafe {
-        let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
-        if hwnd.is_null() {
-            return false;
-        }
         let none = MARGINS { cxLeftWidth: 0, cxRightWidth: 0, cyTopHeight: 0, cyBottomHeight: 0 };
         DwmExtendFrameIntoClientArea(hwnd, &none);
         // DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED; DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_DONOTROUND.
@@ -302,14 +315,10 @@ pub fn flatten_window(title: &str) -> bool {
 /// que a pessoa está trabalhando (o widget e a lista de tarefas flutuam sobre ele). Retorna `false` se a janela
 /// ainda não existe.
 pub fn no_activate(title: &str) -> bool {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_NOACTIVATE};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_NOACTIVATE};
 
-    let wide: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+    let Some(hwnd) = find_window(title) else { return false };
     unsafe {
-        let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
-        if hwnd.is_null() {
-            return false;
-        }
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE as isize);
     }
@@ -320,14 +329,9 @@ pub fn no_activate(title: &str) -> bool {
 /// do egui. `None` se a janela ainda não existe. Serve para uma janela que acompanha outra não sair da tela.
 pub fn work_area(title: &str, pixels_per_point: f32) -> Option<Rect> {
     use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow};
-    use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
 
-    let wide: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+    let hwnd = find_window(title)?;
     unsafe {
-        let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
-        if hwnd.is_null() {
-            return None;
-        }
         let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         let mut info: MONITORINFO = std::mem::zeroed();
         info.cbSize = size_of::<MONITORINFO>() as u32;
@@ -375,12 +379,35 @@ pub fn resize_handles(ui: &mut egui::Ui, full: Rect) {
 /// Retângulo em pixels da tela, como o Windows os conta: `[esquerda, topo, direita, base]`.
 pub type PxRect = [i32; 4];
 
-fn find_window(title: &str) -> Option<HWND> {
-    use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
+/// A janela de título `title` criada por esta thread (a da interface, dona de todas as janelas do app).
+///
+/// Não usa `FindWindowW`: ele procura em todos os processos e devolve a primeira janela com esse título na ordem
+/// de empilhamento, que pode ser de outro programa, como uma janela do Explorer aberta numa pasta chamada
+/// "N.avi" (a pasta de instalação se chama assim) ou uma segunda cópia do próprio app. Esconder ou mover a
+/// janela errada deixava o botão de minimizar "sem efeito" e podia sumir com a janela de verdade.
+pub fn find_window(title: &str) -> Option<HWND> {
+    use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{EnumThreadWindows, InternalGetWindowText};
 
-    let wide: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
-    let hwnd = unsafe { FindWindowW(std::ptr::null(), wide.as_ptr()) };
-    (!hwnd.is_null()).then_some(hwnd)
+    struct Search {
+        wanted: Vec<u16>,
+        found: HWND,
+    }
+    unsafe extern "system" fn each(hwnd: HWND, lparam: LPARAM) -> windows_sys::core::BOOL {
+        // SAFETY: `lparam` é o ponteiro para o `Search` desta chamada, vivo até `EnumThreadWindows` voltar.
+        let search = unsafe { &mut *(lparam as *mut Search) };
+        let mut buf = vec![0u16; search.wanted.len() + 2];
+        // Lê o título guardado pelo sistema, sem mandar mensagem à janela (que está no meio de um quadro).
+        let len = unsafe { InternalGetWindowText(hwnd, buf.as_mut_ptr(), buf.len() as i32) } as usize;
+        if len == search.wanted.len() && buf[..len] == search.wanted[..] {
+            search.found = hwnd;
+            return 0;
+        }
+        1
+    }
+    let mut search = Search { wanted: title.encode_utf16().collect(), found: std::ptr::null_mut() };
+    unsafe { EnumThreadWindows(GetCurrentThreadId(), Some(each), &mut search as *mut Search as LPARAM) };
+    (!search.found.is_null()).then_some(search.found)
 }
 
 fn px_rect(r: windows_sys::Win32::Foundation::RECT) -> PxRect {
@@ -523,6 +550,15 @@ pub fn resized(rect: PxRect, dir: Dir, (dx, dy): (i32, i32), min: [i32; 2]) -> P
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn so_acha_janelas_desta_thread() {
+        // O processo dos testes não tem janela nenhuma: mesmo com um N.avi de verdade aberto na máquina (que o
+        // `FindWindowW` acharia), nada é devolvido. Também não derruba quando o título não existe.
+        assert_eq!(find_window(crate::brand::MAIN_TITLE), None);
+        assert_eq!(find_window(crate::brand::WIDGET_TITLE), None);
+        assert_eq!(find_window(""), None);
+    }
 
     #[test]
     fn dentro_da_tela_mesmo_sem_o_monitor_de_antes() {
