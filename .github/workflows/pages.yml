@@ -29,7 +29,7 @@ jobs:
           node-version: 22
       - name: Testes da lógica (recorrência, entrada rápida, armazém)
         # Arquivo explícito: nas versões novas do Node, um nome de pasta não é varrido pelo --test.
-        run: node --test web/tests/logica.test.mjs web/tests/sync.test.mjs
+        run: node --test --test-force-exit web/tests/logica.test.mjs web/tests/sync.test.mjs web/tests/drive.test.mjs
       - name: Confere que o site e o service worker listam os mesmos arquivos
         run: node web/tools/conferir.mjs
 
@@ -51,7 +51,7 @@ jobs:
       - name: Monta o site (só web/, sem testes nem ferramentas) e carimba a versão do cache
         run: |
           mkdir _site
-          cp -r web/index.html web/manifest.webmanifest web/sw.js web/css web/js web/icons _site/
+          cp -r web/index.html web/manifest.webmanifest web/sw.js web/config web/css web/js web/icons _site/
           sed -i "s/__VERSAO__/${GITHUB_SHA::10}/" _site/sw.js
           grep -n "const VERSAO" _site/sw.js
           touch _site/.nojekyll

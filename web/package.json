@@ -2,7 +2,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "test": "node --test tests/logica.test.mjs tests/sync.test.mjs",
+    "test": "node --test --test-force-exit tests/logica.test.mjs tests/sync.test.mjs tests/drive.test.mjs",
     "conferir": "node tools/conferir.mjs",
     "servir": "node tools/servir.mjs 8123"
   }

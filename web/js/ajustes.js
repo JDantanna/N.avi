@@ -57,6 +57,67 @@ async function importar(ctx, arquivo) {
   }
 }
 
+/** A parte "Sincronização": conectar ao Drive, ver o estado e resolver o que travar. Se refaz sozinha a cada mudança. */
+function blocoNuvem(ctx) {
+  const conexao = ctx.conexao;
+  const raiz = h("div", { class: "bloco" });
+  let ocupado = false;
+  let parar = () => {};
+
+  const agir = async (fazer) => {
+    if (ocupado) return;
+    ocupado = true;
+    desenhar();
+    try {
+      await fazer();
+    } catch (erro) {
+      ctx.avisar(erro?.message || "Não deu certo. Tente de novo.");
+    } finally {
+      ocupado = false;
+      desenhar();
+    }
+  };
+
+  function desenhar() {
+    // A folha foi fechada: esta parte deixa de ouvir.
+    if (raiz.dataset.montada && !raiz.isConnected) {
+      parar();
+      return;
+    }
+    raiz.dataset.montada = "1";
+    const botao = (rotulo, aoTocar, classe = "botao-largo") => h("button", { class: classe, type: "button", disabled: ocupado, onclick: aoTocar }, rotulo);
+    const filhos = [h("h3", {}, "Sincronização")];
+    if (!conexao.configurada) {
+      filhos.push(h("p", { class: "dica" }, "A sincronização com o Google Drive ainda não está ativada neste app. Enquanto isso, o tasks.json leva as tarefas entre o computador e o celular."));
+    } else if (!conexao.ligada) {
+      filhos.push(
+        h("p", { class: "dica" }, "Mantém o celular e o computador iguais pelo Google Drive. No computador, escolha uma pasta do Drive na janela de Backup; aqui, escolha o arquivo N.avi.sync.json que ele criou."),
+        botao([icone("nuvem", 20), ocupado ? "Conectando…" : "Conectar ao Google Drive"], () => agir(() => conexao.conectar())),
+      );
+    } else {
+      const { nivel, texto } = conexao.resumo;
+      const fase = conexao.sincronia?.estado.fase;
+      filhos.push(
+        h("p", { class: `estado-nuvem ${nivel}`, role: "status" }, h("span", { class: "ponto", "aria-hidden": "true" }), texto),
+        h("p", { class: "dica" }, `Arquivo: ${conexao.nomeDoArquivo}`),
+      );
+      if (fase === "escolher") filhos.push(botao("Escolher o arquivo de novo", () => agir(() => conexao.escolherDeNovo())));
+      else if (fase === "entrar") filhos.push(botao("Entrar de novo", () => agir(() => conexao.entrarDeNovo())));
+      else filhos.push(botao("Sincronizar agora", () => agir(() => conexao.sincronizarAgora())));
+      filhos.push(
+        botao("Desconectar", () => {
+          if (confirm("Parar de sincronizar com o Google Drive?\n\nAs tarefas deste aparelho ficam como estão e o arquivo no Drive não é mexido.")) agir(() => conexao.desconectar());
+        }, "botao-largo perigo"),
+      );
+    }
+    raiz.replaceChildren(...filhos);
+  }
+
+  parar = conexao.ouvir(desenhar);
+  desenhar();
+  return raiz;
+}
+
 export function abrirAjustes(ctx) {
   return abrirFolha({
     classe: "folha-ajustes",
@@ -78,9 +139,10 @@ export function abrirAjustes(ctx) {
         { class: "ajustes" },
         h("div", { class: "bloco" },
           h("label", { class: "linha-campo interruptor", for: "ajuste-domingo" }, h("span", {}, "Semana começa no domingo"), domingo)),
+        blocoNuvem(ctx),
         h("div", { class: "bloco" },
           h("h3", {}, "Dados deste aparelho"),
-          h("p", { class: "dica" }, "As tarefas ficam guardadas aqui, no iPhone. Até a sincronização com a nuvem chegar, o tasks.json leva as tarefas entre o computador e o celular."),
+          h("p", { class: "dica" }, "As tarefas ficam guardadas aqui, no iPhone. Sem a sincronização, o tasks.json leva as tarefas entre o computador e o celular."),
           h("button", { class: "botao-largo", type: "button", onclick: () => exportar(ctx) }, icone("exportar", 20), "Exportar tasks.json"),
           h("button", { class: "botao-largo", type: "button", onclick: () => arquivo.click() }, icone("importar", 20), "Importar tasks.json"),
           arquivo,

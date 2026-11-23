@@ -3,6 +3,7 @@
 import { abrirAjustes } from "./ajustes.js";
 import { Armazem, CHAVE } from "./armazem.js";
 import { criarCalendario } from "./calendario.js";
+import { Conexao } from "./conexao.js";
 import { agoraHMS, diaMes, hojeIso } from "./datas.js";
 import { abrirDetalhe } from "./detalhe.js";
 import { fada, h, icone } from "./dom.js";
@@ -85,11 +86,25 @@ function iniciar() {
   const botoesAba = Object.entries(abas).map(([id, aba]) =>
     h("button", { class: "aba", type: "button", "data-aba": id, onclick: () => ctx.mudarEstado({ aba: id }) }, icone(aba.icone, 24), h("span", {}, aba.rotulo)),
   );
+  // A nuvem aparece na barra só quando a sincronização está ligada; a cor diz como vai (e tocar abre os ajustes).
+  const botaoNuvem = h("button", { class: "botao-icone nuvem", type: "button", hidden: "", onclick: () => abrirAjustes(ctx) }, icone("nuvem", 22));
+  const conexao = new Conexao({ armazem });
+  ctx.conexao = conexao;
+  const atualizarNuvem = () => {
+    const { nivel, texto } = conexao.resumo;
+    botaoNuvem.hidden = !conexao.ligada;
+    botaoNuvem.className = `botao-icone nuvem ${nivel}`;
+    botaoNuvem.setAttribute("aria-label", texto);
+  };
+  conexao.ouvir(atualizarNuvem);
   const topo = h(
     "header",
     { class: "topo" },
     h("div", { class: "marca-app" }, fada(30), h("span", {}, "N.avi")),
-    h("button", { class: "botao-icone", "aria-label": "Ajustes e dados", onclick: () => abrirAjustes(ctx) }, icone("ajustes", 22)),
+    h("div", { class: "acoes-topo" },
+      botaoNuvem,
+      h("button", { class: "botao-icone", "aria-label": "Ajustes e dados", onclick: () => abrirAjustes(ctx) }, icone("ajustes", 22)),
+    ),
   );
   // Se o aparelho não deixa guardar (sem espaço, aba privada), o que se edita só existe na memória: avisa e não some.
   const faixa = h("div", { class: "faixa-aviso", role: "alert", hidden: "" }, "Não consegui guardar suas tarefas neste aparelho (sem espaço ou aba privada). Elas só existem enquanto o app estiver aberto: exporte uma cópia em Ajustes.");
@@ -150,6 +165,14 @@ function iniciar() {
   });
 
   desenhar();
+  // As credenciais do Google ficam em config/nuvem.json; sem elas (ou sem internet na primeira vez) o app só guarda no aparelho.
+  fetch("./config/nuvem.json")
+    .then((r) => (r.ok ? r.json() : null))
+    .then((config) => {
+      conexao.config = config?.google ?? {};
+      conexao.iniciar();
+    })
+    .catch(() => {});
   // O iOS pode apagar os dados de um site que fica semanas sem uso; pedir armazenamento persistente reduz o risco
   // (o Safari decide, e quase sempre concede a um app instalado na tela de início). A nuvem é a cópia de verdade.
   navigator.storage?.persist?.().catch(() => {});

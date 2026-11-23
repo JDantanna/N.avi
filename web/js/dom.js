@@ -55,6 +55,7 @@ const FORMAS = {
   proximos: [["rect", { x: 3.5, y: 5, width: 17, height: 15.5, rx: 3 }], ["path", { d: "M3.5 10h17M8 3v4M16 3v4" }]],
   todas: [["path", { d: "M9 6.5h11M9 12h11M9 17.5h11" }], ["circle", { cx: 4.8, cy: 6.5, r: 1 }], ["circle", { cx: 4.8, cy: 12, r: 1 }], ["circle", { cx: 4.8, cy: 17.5, r: 1 }]],
   concluidas: [["circle", { cx: 12, cy: 12, r: 9 }], ["path", { d: "M8 12.5l3 3 5-6" }]],
+  nuvem: [["path", { d: "M7.5 18.5a4.5 4.5 0 0 1-.9-8.9 5.5 5.5 0 0 1 10.6 1.4 3.8 3.8 0 0 1-.7 7.5z" }]],
   exportar: [["path", { d: "M12 15V3.5M7.5 8L12 3.5 16.5 8M5 13v6.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V13" }]],
   importar: [["path", { d: "M12 3.5V15M7.5 11L12 15.5 16.5 11M5 13v6.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V13" }]],
 };

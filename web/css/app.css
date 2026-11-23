@@ -132,6 +132,29 @@ p {
   height: 36px;
 }
 
+.botao-icone[hidden] {
+  display: none;
+}
+
+.acoes-topo {
+  display: flex;
+  align-items: center;
+}
+
+/* A nuvem na barra: a cor diz como vai a sincronização. */
+.botao-icone.nuvem.ok {
+  color: #58c48d;
+}
+
+.botao-icone.nuvem.pendente,
+.botao-icone.nuvem.trabalhando {
+  color: var(--acento);
+}
+
+.botao-icone.nuvem.erro {
+  color: var(--vermelho-texto);
+}
+
 .telas {
   flex: 1;
   min-height: 0;
@@ -1090,9 +1113,53 @@ textarea.campo {
   background: #2d3552;
 }
 
+.botao-largo.perigo {
+  color: var(--vermelho-texto);
+}
+
+.botao-largo:disabled {
+  opacity: 0.55;
+}
+
 .sobre {
   text-align: center;
   background: transparent;
+}
+
+/* O estado da sincronização na folha de ajustes: um ponto colorido e o texto. */
+.estado-nuvem {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 0 6px;
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.estado-nuvem .ponto {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--dim);
+}
+
+.estado-nuvem.ok .ponto {
+  background: #58c48d;
+}
+
+.estado-nuvem.pendente .ponto,
+.estado-nuvem.trabalhando .ponto {
+  background: var(--acento);
+}
+
+.estado-nuvem.erro {
+  color: var(--vermelho-texto);
+}
+
+.estado-nuvem.erro .ponto {
+  background: var(--vermelho);
 }
 
 /* ---------------------------------------------------------------- avisos */

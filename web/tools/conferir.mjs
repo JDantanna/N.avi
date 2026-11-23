@@ -18,7 +18,7 @@ const arquivos = (pasta) =>
   readdirSync(join(RAIZ, pasta), { withFileTypes: true })
     .filter((e) => e.isFile())
     .map((e) => relative(RAIZ, join(RAIZ, pasta, e.name)).replaceAll("\\", "/"));
-const doApp = new Set(["index.html", "manifest.webmanifest", ...arquivos("css"), ...arquivos("js"), ...arquivos("icons")]);
+const doApp = new Set(["index.html", "manifest.webmanifest", ...arquivos("config"), ...arquivos("css"), ...arquivos("js"), ...arquivos("icons")]);
 
 for (const a of doApp) if (!guardados.has(a)) erros.push(`${a}: existe mas não está na lista do service worker.`);
 for (const a of guardados) if (!existsSync(join(RAIZ, a))) erros.push(`${a}: está na lista do service worker mas não existe.`);

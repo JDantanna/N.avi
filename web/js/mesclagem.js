@@ -214,6 +214,38 @@ export function adiantarRelogio(armazem, arquivo) {
   for (const e of Object.values(arquivo.tags)) armazem.adiantarRelogio(e.at);
 }
 
+/** Separador entre o texto que venceu e o do outro aparelho, quando os dois editaram as informações. */
+export const SEPARADOR_OUTRA_VERSAO = "--- versão de outro aparelho ---";
+
+/**
+ * Combina um grupo que os dois lados mudaram, sem perder nada de nenhum: tags em união, checklist em união por
+ * item (concluído se qualquer lado concluiu), informações com o texto vencedor (carimbo maior; empate pelo texto)
+ * e o perdedor no fim, depois de um separador. Os outros grupos não se combinam (devolve `false`).
+ */
+export function combinar(local, de, g) {
+  switch (g) {
+    case "tags":
+      for (const t of de.tags) if (!local.tags.includes(t)) local.tags.push(t);
+      return true;
+    case "subtasks":
+      for (const s of de.subtasks) {
+        const igual = local.subtasks.find((l) => l.title === s.title);
+        if (igual) igual.done = Boolean(igual.done || s.done);
+        else local.subtasks.push({ ...s });
+      }
+      return true;
+    case "notes": {
+      const [ls, rs] = [local.stamps.notes, de.stamps.notes];
+      const localVence = ls > rs || (ls === rs && compararBytes(chaveGrupo(local, g), chaveGrupo(de, g)) >= 0);
+      const [vencedor, perdedor] = localVence ? [local.notes, de.notes] : [de.notes, local.notes];
+      local.notes = perdedor.trim() === "" ? vencedor : `${vencedor.trimEnd()}\n\n${SEPARADOR_OUTRA_VERSAO}\n${perdedor.trim()}`;
+      return true;
+    }
+    default:
+      return false;
+  }
+}
+
 // ---------------------------------------------------------------------------------------------------- mesclar
 
 /**
@@ -227,6 +259,10 @@ export function mesclar(armazem, remoto, aparelho, agoraParede) {
   let mudouLocal = false;
   if (remoto) {
     adiantarRelogio(armazem, remoto);
+    // Carimbo para os grupos combinados (os dois lados mudaram): novo, à frente de tudo o que já se viu, para o
+    // resultado combinado vencer as duas versões em qualquer aparelho.
+    const novo = Math.max(agoraParede, d.clock + 1);
+    let usouNovo = false;
 
     for (const rt of remoto.tasks) {
       const lapide = d.deleted.find((x) => x.uid === rt.uid);
@@ -239,11 +275,28 @@ export function mesclar(armazem, remoto, aparelho, agoraParede) {
       }
       const local = armazem.acharUid(rt.uid);
       if (local) {
+        const base = armazem.base.get(rt.uid);
         for (const g of GRUPOS_SYNC) {
           const [ls, rs] = [local.stamps[g], rt.stamps[g]];
+          if (igualGrupo(local, rt, g)) {
+            // O mesmo valor nos dois lados nunca é conflito; só o carimbo converge para o maior.
+            if (rs > ls) {
+              local.stamps[g] = rs;
+              mudouLocal = true;
+            }
+            continue;
+          }
+          // Os dois lados mudaram o mesmo grupo desde a última mesclagem: informações, checklist e tags são
+          // combinados em vez de escolher um lado (sem base, vale o carimbo).
+          if (base && !igualGrupo(base, local, g) && !igualGrupo(base, rt, g) && combinar(local, rt, g)) {
+            local.stamps[g] = novo;
+            usouNovo = true;
+            mudouLocal = true;
+            continue;
+          }
           const maisNova = rs > ls;
           // Empate exato com conteúdo diferente: decide pelo texto, igual nos dois lados.
-          const empate = rs === ls && !igualGrupo(local, rt, g) && compararBytes(chaveGrupo(rt, g), chaveGrupo(local, g)) > 0;
+          const empate = rs === ls && compararBytes(chaveGrupo(rt, g), chaveGrupo(local, g)) > 0;
           if (maisNova || empate) {
             copiarGrupo(local, rt, g);
             mudouLocal = true;
@@ -277,6 +330,7 @@ export function mesclar(armazem, remoto, aparelho, agoraParede) {
         mudouLocal = true;
       }
     }
+    if (usouNovo) armazem.adiantarRelogio(novo);
   }
 
   // Lápides velhas saem, pelo relógio de parede: uma lápide "do futuro" (aparelho com a hora adiantada) fica.
@@ -291,18 +345,18 @@ export function mesclar(armazem, remoto, aparelho, agoraParede) {
 
 /**
  * Primeira mesclagem com um arquivo que já existe: uma tarefa daqui sem par no arquivo e uma do arquivo sem par
- * aqui, com o mesmo título, data e hora, são a mesma tarefa que ganhou `uid`s diferentes. A daqui assume a do
- * arquivo, inteira (só o `id` local fica). Sem isto, tudo apareceria em dobro.
+ * aqui, IGUAIS EM TODOS OS GRUPOS, são a mesma tarefa que ganhou `uid`s diferentes. A daqui assume o `uid` e os
+ * carimbos da do arquivo. Se algo difere, as duas ficam (uma duplicata visível em vez de perder conteúdo).
  */
 export function adotarIguais(armazem, remoto) {
   const uidsRemotos = new Set(remoto.tasks.map((t) => t.uid));
-  const chave = (t) => `${t.title.trim()}\u0000${t.date ?? ""}\u0000${t.time ?? ""}`;
   let mudou = false;
   for (const rt of remoto.tasks) {
     if (armazem.acharUid(rt.uid)) continue;
-    const i = armazem.dados.tasks.findIndex((lt) => !uidsRemotos.has(lt.uid) && chave(lt) === chave(rt));
-    if (i >= 0) {
-      armazem.dados.tasks[i] = { ...structuredClone(rt), id: armazem.dados.tasks[i].id };
+    const local = armazem.dados.tasks.find((lt) => !uidsRemotos.has(lt.uid) && GRUPOS_SYNC.every((g) => igualGrupo(lt, rt, g)));
+    if (local) {
+      local.uid = rt.uid;
+      local.stamps = carimbosCompletos(rt.stamps);
       mudou = true;
     }
   }

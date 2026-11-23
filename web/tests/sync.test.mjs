@@ -50,6 +50,8 @@ test("mesclagem: todos os casos compartilhados com o desktop (docs/sync-casos/me
   for (const caso of casos.casos) {
     const agora = caso.agora ?? casos.agora;
     const a = armazemDe(caso.local, agora);
+    // A base: o estado da última mesclagem que o aparelho conhece, para saber se os dois lados mudaram o mesmo grupo.
+    if (caso.base) a.base = new Map(S.lerArquivo(JSON.stringify(caso.base)).tasks.map((t) => [t.uid, t]));
     const remoto = caso.remoto ? S.lerArquivo(JSON.stringify(caso.remoto)) : null;
     if (caso.primeira_vez && remoto) S.adotarIguais(a, remoto);
     const saida = S.mesclar(a, remoto, "teste", agora);
@@ -57,7 +59,32 @@ test("mesclagem: todos os casos compartilhados com o desktop (docs/sync-casos/me
     assert.ok(S.mesmoConteudo(esperado, saida.arquivo), `${caso.nome}:\nesperado ${JSON.stringify(esperado)}\nveio     ${JSON.stringify(saida.arquivo)}`);
     n += 1;
   }
-  assert.ok(n >= 9, `${n} casos lidos`);
+  assert.ok(n >= 15, `${n} casos lidos`);
+});
+
+test("ciclo: informações editadas nos dois aparelhos (com a gravação local no meio) são combinadas, sem perder texto", async () => {
+  const disco = falso();
+  const celular = new Armazem(disco, () => T0 + 1000);
+  const nuvem = nuvemFalsa(JSON.stringify({ schema: 1, tasks: [tarefa("t", "Consulta", T0, { notes: "Levar documentos" })], deleted: [], tags: {} }));
+  await sincronia(celular, nuvem).sincronizar({ primeiraVez: true }); // fixa a base
+  // O celular edita e GRAVA (a gravação refaz o retrato de carimbar, mas não a base da mesclagem)...
+  celular.alterar(celular.tarefas[0].id, (x) => {
+    x.notes = "Levar documentos e exames";
+  });
+  celular.gravar();
+  // ...e o computador edita o mesmo texto e grava no arquivo, com carimbo mais novo.
+  const f = JSON.parse(nuvem.texto);
+  f.tasks[0].notes = "Levar RG";
+  f.tasks[0].stamps.notes = T0 + 400_000;
+  nuvem.texto = JSON.stringify(f);
+  nuvem.v += 1;
+  await sincronia(celular, nuvem).sincronizar();
+  const esperado = `Levar RG\n\n${S.SEPARADOR_OUTRA_VERSAO}\nLevar documentos e exames`;
+  assert.equal(celular.tarefas[0].notes, esperado);
+  assert.equal(JSON.parse(nuvem.texto).tasks[0].notes, esperado, "o combinado vai para a nuvem");
+  // A base sobrevive a fechar e abrir o app.
+  assert.equal(new Armazem(disco, () => T0).base.get(celular.tarefas[0].uid).notes, esperado);
+  clearTimeout(celular.timer);
 });
 
 test("mesclagem: o mesmo resultado em qualquer ordem", () => {
@@ -276,7 +303,7 @@ test("ciclo: traz a tarefa do computador, manda a daqui e não regrava sem mudan
 test("ciclo: primeira vez com o arquivo do computador não duplica a tarefa igual", async () => {
   const a = new Armazem(falso(), () => T0);
   a.adicionar("Aluguel", "2026-12-05");
-  const nuvem = nuvemFalsa(JSON.stringify({ schema: 1, tasks: [tarefa("pc-1", "Aluguel", T0 - 100, { date: "2026-12-05" })], deleted: [], tags: {} }));
+  const nuvem = nuvemFalsa(JSON.stringify({ schema: 1, tasks: [tarefa("pc-1", "Aluguel", T0 - 100, { date: "2026-12-05", anchor_day: 5 })], deleted: [], tags: {} }));
   await sincronia(a, nuvem).sincronizar({ primeiraVez: true });
   assert.equal(a.tarefas.length, 1);
   assert.equal(a.tarefas[0].uid, "pc-1", "assume a identidade do arquivo");

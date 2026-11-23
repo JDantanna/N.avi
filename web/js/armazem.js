@@ -12,6 +12,7 @@ import { GRUPOS_SYNC, carimbosCompletos, normalizar, novaTarefa } from "./modelo
 import { definirAncora, reagendar } from "./recorrencia.js";
 
 export const CHAVE = "navi.tarefas.v1";
+export const CHAVE_BASE = "navi.base.v1";
 /** Espera depois da última mudança antes de gravar (para não gravar a cada tecla). */
 const ESPERA_GRAVACAO_MS = 250;
 /** Se a gravação falhar, tenta de novo neste intervalo. */
@@ -34,7 +35,30 @@ export class Armazem {
     /** As tarefas como estavam na última gravação ou mesclagem, por uid: comparando com isto se sabe o que mudou. */
     this.ultimo = new Map();
     this.dados = this.#ler();
+    /**
+     * As tarefas como ficaram na ÚLTIMA MESCLAGEM com a nuvem, por uid. É diferente de `ultimo` (que se refaz a cada
+     * gravação): serve para saber se os dois lados mudaram o mesmo grupo desde que se sincronizaram, e por isso
+     * só se atualiza ao fim de uma mesclagem e fica guardada entre uma abertura do app e outra.
+     */
+    this.base = this.#lerBase();
     this.#migrar();
+  }
+
+  #lerBase() {
+    try {
+      const lista = JSON.parse(this.storage?.getItem(CHAVE_BASE) ?? "[]");
+      return new Map((Array.isArray(lista) ? lista : []).filter((t) => t && typeof t.uid === "string").map((t) => [t.uid, normalizar(t)]));
+    } catch {
+      return new Map();
+    }
+  }
+
+  /** Depois de uma mesclagem: o estado de agora é a base da próxima. */
+  fixarBase() {
+    this.base = new Map(this.tarefas.map((t) => [t.uid, structuredClone(t)]));
+    try {
+      this.storage?.setItem(CHAVE_BASE, JSON.stringify([...this.base.values()]));
+    } catch { /* sem espaço: sem base, a próxima mesclagem decide só pelo carimbo, sem perder nada */ }
   }
 
   #ler() {

@@ -65,7 +65,7 @@ export class Sincronia {
   }
 
   /** Começa a acompanhar as edições (sincroniza logo depois de cada uma) e a conferir a nuvem de tempos em tempos. */
-  ligar() {
+  ligar({ jaSincronizou = false } = {}) {
     const parar = this.armazem.aoMudar((origem) => {
       if (origem === "sincronia" || origem === "recarregar" || origem === "gravacao") return;
       this.mudancas += 1;
@@ -86,9 +86,17 @@ export class Sincronia {
       clearTimeout(this.timer);
       doc?.removeEventListener("visibilitychange", aoVoltar);
     };
+    if (jaSincronizou) return;
     // Ao ligar não se sabe o que ficou sem ir ao arquivo na última vez: conta como pendente até o primeiro ciclo dar certo.
     this.#estado({ pendente: true });
     this.agendar(0);
+  }
+
+  /** A pessoa resolveu o que travava (escolheu o arquivo de novo, entrou de novo): volta a sincronizar do zero. */
+  reiniciar() {
+    this.versaoVista = null;
+    this.falhas = 0;
+    this.#estado({ fase: "pronta", mensagem: "" });
   }
 
   agendar(ms) {
@@ -178,6 +186,7 @@ export class Sincronia {
       }
       // O estado mesclado passa a ser a referência: o que veio de fora não é recarimbado como edição daqui.
       armazem.marcarSincronizado();
+      armazem.fixarBase();
       if (mudouLocal) {
         armazem.marcarSujo();
         armazem.avisar("sincronia");
