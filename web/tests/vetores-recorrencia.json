@@ -1,0 +1,207 @@
+{
+  "descricao": "Vetores da recorrência das tarefas, compartilhados entre o app web (web/js/recorrencia.js) e o desktop (src/model.rs). Datas em AAAA-MM-DD; horas em HH:MM:SS. Cada caso vem de um teste ou de uma regra do model.rs. `hoje` é sempre dado, nunca lido do relógio.",
+  "ocorre_em": [
+    {
+      "nome": "mensal no dia 30: fevereiro usa o último dia e março volta ao 30",
+      "tarefa": { "date": "2026-01-30", "repeat": "Monthly", "every": 1, "anchor_day": 30, "repeat_times": null },
+      "sim": ["2026-01-30", "2026-02-28", "2026-03-30", "2026-04-30"],
+      "nao": ["2026-03-29", "2025-12-30", "2026-02-27", "2026-03-31"]
+    },
+    {
+      "nome": "mensal repetindo 3 vezes (dia 5)",
+      "tarefa": { "date": "2026-01-05", "repeat": "Monthly", "every": 1, "anchor_day": 5, "repeat_times": 3 },
+      "sim": ["2026-01-05", "2026-02-05", "2026-03-05"],
+      "nao": ["2026-04-05", "2026-05-05", "2026-01-06"]
+    },
+    {
+      "nome": "o mesmo sem limite de vezes continua em abril",
+      "tarefa": { "date": "2026-01-05", "repeat": "Monthly", "every": 1, "anchor_day": 5, "repeat_times": null },
+      "sim": ["2026-04-05", "2026-12-05", "2027-01-05"],
+      "nao": ["2026-04-06"]
+    },
+    {
+      "nome": "diária a cada 3 dias",
+      "tarefa": { "date": "2026-11-01", "repeat": "Daily", "every": 3, "anchor_day": 1, "repeat_times": null },
+      "sim": ["2026-11-01", "2026-11-04", "2026-11-07", "2026-12-01"],
+      "nao": ["2026-11-02", "2026-11-03", "2026-10-29"]
+    },
+    {
+      "nome": "diária repetindo 2 vezes",
+      "tarefa": { "date": "2026-11-01", "repeat": "Daily", "every": 1, "anchor_day": 1, "repeat_times": 2 },
+      "sim": ["2026-11-01", "2026-11-02"],
+      "nao": ["2026-11-03", "2026-11-04"]
+    },
+    {
+      "nome": "semanal a cada 2 semanas",
+      "tarefa": { "date": "2026-11-02", "repeat": "Weekly", "every": 2, "anchor_day": 2, "repeat_times": null },
+      "sim": ["2026-11-02", "2026-11-16", "2026-11-30"],
+      "nao": ["2026-11-09", "2026-11-03", "2026-11-23"]
+    },
+    {
+      "nome": "anual em 29 de fevereiro: nos anos comuns cai em 28",
+      "tarefa": { "date": "2028-02-29", "repeat": "Yearly", "every": 1, "anchor_day": 29, "repeat_times": null },
+      "sim": ["2028-02-29", "2029-02-28", "2030-02-28", "2032-02-29"],
+      "nao": ["2029-03-01", "2029-02-27", "2028-03-29"]
+    },
+    {
+      "nome": "sem repetição só cai na própria data",
+      "tarefa": { "date": "2026-11-10", "repeat": "None", "every": 1, "anchor_day": 10, "repeat_times": null },
+      "sim": ["2026-11-10"],
+      "nao": ["2026-11-11", "2026-11-09", "2027-11-10"]
+    },
+    {
+      "nome": "sem data nunca cai em dia nenhum",
+      "tarefa": { "date": null, "repeat": "Daily", "every": 1, "anchor_day": 0, "repeat_times": null },
+      "sim": [],
+      "nao": ["2026-11-10"]
+    },
+    {
+      "nome": "âncora zero usa o dia da data de início",
+      "tarefa": { "date": "2026-01-15", "repeat": "Monthly", "every": 1, "anchor_day": 0, "repeat_times": null },
+      "sim": ["2026-02-15", "2026-07-15"],
+      "nao": ["2026-02-14"]
+    }
+  ],
+  "proxima_apos": [
+    {
+      "nome": "mensal no dia 30: de janeiro vai a 28 de fevereiro e volta ao 30 em março",
+      "tarefa": { "repeat": "Monthly", "every": 1, "anchor_day": 30 },
+      "de": "2026-01-30",
+      "para": "2026-02-28"
+    },
+    {
+      "nome": "o mesmo, de fevereiro para março",
+      "tarefa": { "repeat": "Monthly", "every": 1, "anchor_day": 30 },
+      "de": "2026-02-28",
+      "para": "2026-03-30"
+    },
+    {
+      "nome": "diária a cada 3",
+      "tarefa": { "repeat": "Daily", "every": 3, "anchor_day": 1 },
+      "de": "2026-12-30",
+      "para": "2027-01-02"
+    },
+    {
+      "nome": "semanal a cada 2",
+      "tarefa": { "repeat": "Weekly", "every": 2, "anchor_day": 1 },
+      "de": "2026-11-23",
+      "para": "2026-12-07"
+    },
+    {
+      "nome": "anual a cada 2 anos",
+      "tarefa": { "repeat": "Yearly", "every": 2, "anchor_day": 14 },
+      "de": "2026-03-14",
+      "para": "2028-03-14"
+    },
+    {
+      "nome": "a cada zero conta como a cada 1",
+      "tarefa": { "repeat": "Daily", "every": 0, "anchor_day": 1 },
+      "de": "2026-11-10",
+      "para": "2026-11-11"
+    }
+  ],
+  "reagendar": [
+    {
+      "nome": "diária repetindo 2 vezes: a primeira conclusão reagenda, a segunda conclui de vez",
+      "hoje": "2026-11-20",
+      "passos": [
+        {
+          "tarefa": { "date": "2026-11-20", "done": true, "repeat": "Daily", "every": 1, "anchor_day": 20, "repeat_times": 2 },
+          "esperado": { "reagendou": true, "date": "2026-11-21", "done": false, "repeat_times": 1 }
+        },
+        {
+          "tarefa": { "date": "2026-11-21", "done": true, "repeat": "Daily", "every": 1, "anchor_day": 20, "repeat_times": 1 },
+          "esperado": { "reagendou": false, "date": "2026-11-21", "done": true, "repeat_times": 1 }
+        }
+      ]
+    },
+    {
+      "nome": "atrasada: pula as datas que já passaram e cai em hoje",
+      "hoje": "2026-11-20",
+      "passos": [
+        {
+          "tarefa": { "date": "2026-11-10", "done": true, "repeat": "Daily", "every": 1, "anchor_day": 10, "repeat_times": null },
+          "esperado": { "reagendou": true, "date": "2026-11-20", "done": false, "repeat_times": null }
+        }
+      ]
+    },
+    {
+      "nome": "atrasada com poucas vezes: as puladas contam e a tarefa conclui de vez",
+      "hoje": "2026-11-20",
+      "passos": [
+        {
+          "tarefa": { "date": "2026-11-10", "done": true, "repeat": "Daily", "every": 1, "anchor_day": 10, "repeat_times": 5 },
+          "esperado": { "reagendou": false, "date": "2026-11-10", "done": true, "repeat_times": 1 }
+        }
+      ]
+    },
+    {
+      "nome": "mensal sem fim: volta pendente no mês seguinte",
+      "hoje": "2026-01-30",
+      "passos": [
+        {
+          "tarefa": { "date": "2026-01-30", "done": true, "repeat": "Monthly", "every": 1, "anchor_day": 30, "repeat_times": null },
+          "esperado": { "reagendou": true, "date": "2026-02-28", "done": false, "repeat_times": null }
+        }
+      ]
+    },
+    {
+      "nome": "sem repetição não reagenda",
+      "hoje": "2026-11-20",
+      "passos": [
+        {
+          "tarefa": { "date": "2026-11-20", "done": true, "repeat": "None", "every": 1, "anchor_day": 20, "repeat_times": null },
+          "esperado": { "reagendou": false, "date": "2026-11-20", "done": true, "repeat_times": null }
+        }
+      ]
+    },
+    {
+      "nome": "pendente não reagenda",
+      "hoje": "2026-11-20",
+      "passos": [
+        {
+          "tarefa": { "date": "2026-11-20", "done": false, "repeat": "Daily", "every": 1, "anchor_day": 20, "repeat_times": null },
+          "esperado": { "reagendou": false, "date": "2026-11-20", "done": false, "repeat_times": null }
+        }
+      ]
+    }
+  ],
+  "atrasada": [
+    {
+      "nome": "ontem, sem hora, está atrasada",
+      "agora": "2026-05-10T12:00:00",
+      "tarefa": { "date": "2026-05-09", "time": null, "done": false },
+      "esperado": true
+    },
+    {
+      "nome": "hoje sem hora ainda não atrasou",
+      "agora": "2026-05-10T12:00:00",
+      "tarefa": { "date": "2026-05-10", "time": null, "done": false },
+      "esperado": false
+    },
+    {
+      "nome": "hoje com hora que já passou está atrasada",
+      "agora": "2026-05-10T12:00:00",
+      "tarefa": { "date": "2026-05-10", "time": "11:00:00", "done": false },
+      "esperado": true
+    },
+    {
+      "nome": "hoje com hora que ainda vem não está atrasada",
+      "agora": "2026-05-10T12:00:00",
+      "tarefa": { "date": "2026-05-10", "time": "12:00:01", "done": false },
+      "esperado": false
+    },
+    {
+      "nome": "concluída nunca está atrasada",
+      "agora": "2026-05-10T12:00:00",
+      "tarefa": { "date": "2026-05-09", "time": "11:00:00", "done": true },
+      "esperado": false
+    },
+    {
+      "nome": "sem data nunca está atrasada",
+      "agora": "2026-05-10T12:00:00",
+      "tarefa": { "date": null, "time": "11:00:00", "done": false },
+      "esperado": false
+    }
+  ]
+}

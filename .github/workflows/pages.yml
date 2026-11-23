@@ -1,0 +1,62 @@
+name: Site N.avi (celular)
+
+# Testa o app web (web/) a cada envio e o publica no GitHub Pages SÓ quando alguém roda este fluxo à mão
+# ("Run workflow"). Não toca no programa do computador nem em releases: publica apenas a pasta web/.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - "docs/sync-casos/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+    inputs:
+      publicar:
+        description: "Publicar o site no GitHub Pages depois dos testes"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Testes da lógica (recorrência, entrada rápida, armazém)
+        run: node --test web/tests
+      - name: Confere que o site e o service worker listam os mesmos arquivos
+        run: node web/tools/conferir.mjs
+
+  publicar:
+    needs: testes
+    if: github.event_name == 'workflow_dispatch' && inputs.publicar
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Monta o site (só web/, sem testes nem ferramentas) e carimba a versão do cache
+        run: |
+          mkdir _site
+          cp -r web/index.html web/manifest.webmanifest web/sw.js web/css web/js web/icons _site/
+          sed -i "s/__VERSAO__/${GITHUB_SHA::10}/" _site/sw.js
+          grep -n "const VERSAO" _site/sw.js
+          touch _site/.nojekyll
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deploy
+        uses: actions/deploy-pages@v4
