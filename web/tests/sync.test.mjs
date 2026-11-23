@@ -100,6 +100,26 @@ test("mesclagem: o mesmo resultado em qualquer ordem", () => {
   assert.ok(ab.arquivo.tasks.every((t) => t.uid !== "z"), "a exclusão de z (200) é mais nova que a edição (150)");
 });
 
+test("combinar informações: se um lado apagou o texto, fica o do outro, sem separador", () => {
+  const com = (a, b, sa, sb) => {
+    const local = { notes: a, stamps: { notes: sa } };
+    S.combinar(local, { notes: b, stamps: { notes: sb } }, "notes");
+    return local.notes;
+  };
+  assert.equal(com("", "Levar RG", 9, 1), "Levar RG", "o vencedor apagou o texto");
+  assert.equal(com("Levar RG", "", 9, 1), "Levar RG", "o perdedor está vazio");
+  assert.equal(com("  \n", "Levar RG", 9, 1), "Levar RG", "só espaços também vale como apagado");
+  assert.equal(com("A", "B", 9, 1), `A\n\n${S.SEPARADOR_OUTRA_VERSAO}\nB`);
+});
+
+test("armazém: o campo base do tasks.json do PC é descartado ao importar e não volta ao exportar", () => {
+  const a = new Armazem(falso(), () => T0);
+  a.importar(JSON.stringify({ next_id: 1, tasks: [{ id: 1, uid: "u1", title: "T" }], base: { u1: { title: "velho" } } }));
+  assert.equal("base" in a.dados, false);
+  assert.equal("base" in JSON.parse(a.exportar()), false);
+  clearTimeout(a.timer);
+});
+
 test("mesclagem: exclusão contra edição, dos dois lados", () => {
   const a = armazemDe({ tasks: [tarefa("a", "A", 100)] }, 1000);
   a.removerUid("a");

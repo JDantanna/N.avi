@@ -77,6 +77,8 @@ export class Armazem {
   /** Aceita o que veio de um arquivo e devolve dados completos. */
   static normalizarDados(dados) {
     const d = dados && typeof dados === "object" ? dados : {};
+    // A base da mesclagem do desktop (tasks.json do PC) não serve aqui: o web guarda a sua em `navi.base.v1`.
+    delete d.base;
     d.tasks = Array.isArray(d.tasks) ? d.tasks.filter((t) => t && typeof t === "object").map(normalizar) : [];
     d.tag_colors = d.tag_colors && typeof d.tag_colors === "object" ? d.tag_colors : {};
     d.tag_stamps = d.tag_stamps && typeof d.tag_stamps === "object" ? d.tag_stamps : {};

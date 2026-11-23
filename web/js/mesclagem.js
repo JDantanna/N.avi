@@ -238,7 +238,10 @@ export function combinar(local, de, g) {
       const [ls, rs] = [local.stamps.notes, de.stamps.notes];
       const localVence = ls > rs || (ls === rs && compararBytes(chaveGrupo(local, g), chaveGrupo(de, g)) >= 0);
       const [vencedor, perdedor] = localVence ? [local.notes, de.notes] : [de.notes, local.notes];
-      local.notes = perdedor.trim() === "" ? vencedor : `${vencedor.trimEnd()}\n\n${SEPARADOR_OUTRA_VERSAO}\n${perdedor.trim()}`;
+      // Um dos lados apagou o texto: fica o que sobrou, sem separador.
+      if (vencedor.trim() === "") local.notes = perdedor;
+      else if (perdedor.trim() === "") local.notes = vencedor;
+      else local.notes = `${vencedor.trimEnd()}\n\n${SEPARADOR_OUTRA_VERSAO}\n${perdedor.trim()}`;
       return true;
     }
     default:
