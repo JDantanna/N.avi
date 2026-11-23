@@ -59,7 +59,7 @@ test("mesclagem: todos os casos compartilhados com o desktop (docs/sync-casos/me
     assert.ok(S.mesmoConteudo(esperado, saida.arquivo), `${caso.nome}:\nesperado ${JSON.stringify(esperado)}\nveio     ${JSON.stringify(saida.arquivo)}`);
     n += 1;
   }
-  assert.ok(n >= 15, `${n} casos lidos`);
+  assert.ok(n >= 17, `${n} casos lidos`);
 });
 
 test("ciclo: informações editadas nos dois aparelhos (com a gravação local no meio) são combinadas, sem perder texto", async () => {
@@ -110,6 +110,9 @@ test("combinar informações: se um lado apagou o texto, fica o do outro, sem se
   assert.equal(com("Levar RG", "", 9, 1), "Levar RG", "o perdedor está vazio");
   assert.equal(com("  \n", "Levar RG", 9, 1), "Levar RG", "só espaços também vale como apagado");
   assert.equal(com("A", "B", 9, 1), `A\n\n${S.SEPARADOR_OUTRA_VERSAO}\nB`);
+  const junto = `Levar RG\n\n${S.SEPARADOR_OUTRA_VERSAO}\nLevar documentos`;
+  assert.equal(com(junto, "Levar documentos", 9, 1), junto, "o vencedor já contém o outro: não acrescenta de novo");
+  assert.equal(com("Levar documentos", junto, 9, 1), junto, "o vencedor está contido no perdedor: fica o maior");
 });
 
 test("armazém: o campo base do tasks.json do PC é descartado ao importar e não volta ao exportar", () => {

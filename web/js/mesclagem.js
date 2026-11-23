@@ -238,10 +238,12 @@ export function combinar(local, de, g) {
       const [ls, rs] = [local.stamps.notes, de.stamps.notes];
       const localVence = ls > rs || (ls === rs && compararBytes(chaveGrupo(local, g), chaveGrupo(de, g)) >= 0);
       const [vencedor, perdedor] = localVence ? [local.notes, de.notes] : [de.notes, local.notes];
-      // Um dos lados apagou o texto: fica o que sobrou, sem separador.
-      if (vencedor.trim() === "") local.notes = perdedor;
-      else if (perdedor.trim() === "") local.notes = vencedor;
-      else local.notes = `${vencedor.trimEnd()}\n\n${SEPARADOR_OUTRA_VERSAO}\n${perdedor.trim()}`;
+      // Um dos lados apagou o texto: fica o que sobrou, sem separador. Um lado já contém o outro (uma combinação
+      // anterior, por exemplo): fica o maior, sem acrescentar de novo.
+      const [v, p] = [vencedor.trim(), perdedor.trim()];
+      if (p === "" || v.includes(p)) local.notes = vencedor;
+      else if (v === "" || p.includes(v)) local.notes = perdedor;
+      else local.notes = `${vencedor.trimEnd()}\n\n${SEPARADOR_OUTRA_VERSAO}\n${p}`;
       return true;
     }
     default:
