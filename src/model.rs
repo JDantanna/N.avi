@@ -401,6 +401,10 @@ pub struct Store {
     /// computador errado (ver `now_stamp`).
     #[serde(default)]
     pub clock: i64,
+    /// Já mesclou com um arquivo de sincronização existente. Antes disso, a primeira mesclagem casa tarefas
+    /// iguais (título, data, hora) que tenham `uid`s diferentes: as de um computador migrado e as do arquivo.
+    #[serde(default)]
+    pub synced_once: bool,
     #[serde(skip)]
     pub dirty: bool,
     /// As tarefas como estavam na última gravação ou sincronização, por `uid`: é comparando com isto que a
@@ -423,8 +427,9 @@ impl Store {
     }
 
     /// Carimba os grupos que mudaram desde a última gravação, cria lápides para as tarefas que sumiram e tira as
-    /// lápides das que voltaram (desfazer). Roda a cada gravação, antes de escrever o arquivo.
-    fn stamp_changes(&mut self) {
+    /// lápides das que voltaram (desfazer). Roda a cada gravação, antes de escrever o arquivo, e antes de cada
+    /// mesclagem, para uma edição ainda não gravada ter carimbo de agora e não perder para o arquivo.
+    pub(crate) fn stamp_changes(&mut self) {
         let changed = self
             .tasks
             .iter()
@@ -563,12 +568,42 @@ impl Store {
     }
 
     /// Desfaz uma mudança: a tarefa volta como estava e, se foi excluída, para a posição de antes.
-    pub fn restore(&mut self, task: Task, index: usize) {
+    /// Se a exclusão já virou lápide (foi gravada), a lápide cai e a tarefa volta carimbada de agora, para vencer
+    /// a lápide que já pode ter ido ao arquivo de sincronização.
+    pub fn restore(&mut self, mut task: Task, index: usize) {
+        if self.deleted.iter().any(|d| d.uid == task.uid) {
+            self.deleted.retain(|d| d.uid != task.uid);
+            let now = self.now_stamp();
+            for g in Group::ALL {
+                task.stamps.set(g, now);
+            }
+        }
         if let Some(p) = self.tasks.iter().position(|t| t.id == task.id) {
             self.tasks[p] = task;
         } else {
             self.tasks.insert(index.min(self.tasks.len()), task);
         }
+        self.dirty = true;
+    }
+
+    /// Depois de restaurar um backup: tudo o que foi restaurado passa a valer como editado agora, para a
+    /// sincronização não desfazer a restauração com o que o arquivo tem de mais novo (inclusive lápides).
+    /// `floor` é o relógio de antes da restauração, para os carimbos novos ficarem à frente dele.
+    pub fn restamp_all(&mut self, floor: i64) {
+        self.bump_clock(floor);
+        let now = self.now_stamp();
+        for t in &mut self.tasks {
+            for g in Group::ALL {
+                t.stamps.set(g, now);
+            }
+        }
+        for at in self.tag_stamps.values_mut() {
+            *at = now;
+        }
+        for name in self.tag_colors.keys() {
+            self.tag_stamps.insert(name.clone(), now);
+        }
+        self.mark_synced();
         self.dirty = true;
     }
 
@@ -864,6 +899,37 @@ mod tests {
         assert_eq!((a, b), (9_000_000_000_001, 9_000_000_000_002));
         s.bump_clock(1);
         assert_eq!(s.clock, b, "um carimbo menor não o puxa para trás");
+    }
+
+    #[test]
+    fn restaurar_backup_recarimba_tudo_para_vencer_o_arquivo() {
+        // Furo 8 da auditoria: sem isto, a sincronização desfaz a restauração com o que o arquivo tem de mais novo.
+        let mut s = Store::default();
+        s.add("Antiga".into(), None);
+        s.set_tag_color("casa", [1, 2, 3]);
+        s.save();
+        let old = s.tasks[0].stamps.latest();
+        let uid = s.tasks[0].uid.clone();
+        s.restamp_all(old + 1_000_000);
+        let fresh = s.tasks[0].stamps.latest();
+        assert!(fresh > old + 1_000_000, "à frente do relógio de antes da restauração");
+        assert!(Group::ALL.iter().all(|g| s.tasks[0].stamps.get(*g) == fresh), "todos os grupos");
+        assert_eq!(s.tag_stamps["casa"], fresh);
+        s.save();
+        assert_eq!(s.tasks[0].stamps.latest(), fresh, "gravar depois não recarimba");
+        // O arquivo tinha excluído e renomeado a tarefa depois do backup: a restaurada vence os dois.
+        let mut gone = crate::sync::SyncTask { uid: uid.clone(), title: "Renomeada".into(), ..Default::default() };
+        gone.stamps.set(Group::Title, old + 600_000);
+        let remote = crate::sync::SyncFile {
+            schema: crate::sync::SCHEMA,
+            tasks: vec![gone],
+            deleted: vec![Tombstone { uid: uid.clone(), at: old + 500_000 }],
+            ..Default::default()
+        };
+        let out = crate::sync::merge(&mut s, Some(&remote), "t", Utc::now().timestamp_millis());
+        assert_eq!(s.tasks.len(), 1);
+        assert_eq!(s.tasks[0].title, "Antiga");
+        assert!(out.file.deleted.is_empty());
     }
 
     /// Os mesmos vetores que o app web roda (`web/tests/vetores-recorrencia.json`): se uma ponta mudar a regra,

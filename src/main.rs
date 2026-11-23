@@ -404,10 +404,18 @@ impl App {
         self.tracker.freeze();
         let data = model::data_dir();
         if backup::commit(&prepared, &data).is_ok() {
-            // A pasta de backup é desta máquina: o backup restaurado pode ter vindo de outro computador.
+            // A pasta de backup, a de sincronização e a identidade do aparelho são desta máquina: o backup
+            // restaurado pode ter vindo de outro computador.
             let mut restored = Settings::load();
             restored.backup_dir = self.settings.backup_dir.take();
+            restored.sync_dir = self.settings.sync_dir.take();
+            restored.device_id = std::mem::take(&mut self.settings.device_id);
             restored.save();
+            // O restaurado vale como editado agora: senão a sincronização o desfaria com o que o arquivo tem de
+            // mais novo (inclusive as exclusões que a pessoa quis reverter).
+            let mut store = Store::load();
+            store.restamp_all(self.store.clock);
+            store.save();
         }
         if let Ok(exe) = std::env::current_exe() {
             let _ = std::process::Command::new(exe).spawn();

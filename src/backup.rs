@@ -385,6 +385,9 @@ impl Backup {
                     ui.label(RichText::new("Restaurar este backup?").strong());
                     ui.label(format!("{name}, com {} tarefas.", prepared.tasks));
                     ui.weak(format!("Os dados de agora serão substituídos, mas antes ganham uma cópia de segurança na mesma pasta. O {} reinicia sozinho.", brand::NAME));
+                    if settings.sync_dir.is_some() {
+                        ui.weak("Com a sincronização ligada, tudo o que for restaurado conta como editado agora e vai para os outros aparelhos; o que só existe neles continua lá.");
+                    }
                     ui.add_space(6.0);
                     ui.horizontal_wrapped(|ui| {
                         if ui.button("Restaurar e reiniciar").clicked() {

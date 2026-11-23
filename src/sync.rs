@@ -2,12 +2,16 @@
 //! `N.avi.sync.json` numa pasta que o Google Drive ou o OneDrive sincronizam; o celular lê e grava o mesmo
 //! arquivo pela API da nuvem. O formato, os carimbos e a regra de mesclagem estão em `docs/sincronizacao.md`;
 //! os casos de teste em `docs/sync-casos/` valem para as duas implementações.
+//!
+//! A leitura e a gravação rodam em segundo plano (a unidade da nuvem pode demorar); a mesclagem roda na thread
+//! da interface, sobre as tarefas como estão agora, para nunca gravar por cima do que a pessoa acabou de digitar.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
-use chrono::{Local, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{Local, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::brand;
@@ -16,12 +20,20 @@ use crate::model::{Group, Repeat, Stamps, Store, Subtask, Task, Tombstone};
 /// Versão do formato do arquivo. Quem lê um `schema` maior não grava nada.
 pub const SCHEMA: u32 = 1;
 pub const FILE_NAME: &str = "N.avi.sync.json";
+const FILE_STEM: &str = "N.avi.sync";
+const CORRUPT_MARK: &str = ".corrompido-";
+/// Subpasta para onde vão as cópias de conflito depois de mescladas.
+pub const CONFLICTS_DIR: &str = "conflitos";
 /// Quanto tempo uma exclusão fica lembrada no arquivo.
 const TOMBSTONE_MS: i64 = 90 * 24 * 3600 * 1000;
 /// De quanto em quanto tempo o arquivo é relido.
 pub const CHECK_SECS: f64 = 20.0;
 /// Espera depois de abrir o app: a unidade da nuvem pode ainda estar montando.
 const FIRST_CHECK_SECS: f64 = 15.0;
+/// Um arquivo ilegível é relido este tanto de vezes, com este intervalo, antes de ser dado como corrompido: na
+/// maioria das vezes é um download do cliente da nuvem ainda pela metade.
+const BAD_READS: u8 = 3;
+const RETRY_SECS: f64 = 3.0;
 
 fn one() -> u32 {
     1
@@ -152,6 +164,20 @@ impl SyncFile {
         };
         sorted(self) == sorted(other) && self.tags == other.tags
     }
+
+    /// O relógio local nunca fica atrás de nada que o arquivo traz.
+    fn bump(&self, store: &mut Store) {
+        store.bump_clock(self.clock);
+        for t in &self.tasks {
+            store.bump_clock(t.stamps.latest());
+        }
+        for d in &self.deleted {
+            store.bump_clock(d.at);
+        }
+        for e in self.tags.values() {
+            store.bump_clock(e.at);
+        }
+    }
 }
 
 pub struct MergeOutcome {
@@ -164,19 +190,12 @@ pub struct MergeOutcome {
 
 /// Mescla o arquivo lido (`None` se ele não existe) com as tarefas locais, dentro de `store`, e devolve o arquivo
 /// a gravar. Determinística: dois aparelhos que mesclem os mesmos dados, em qualquer ordem, chegam ao mesmo lugar.
-pub fn merge(store: &mut Store, remote: Option<&SyncFile>, device: &str) -> MergeOutcome {
+/// `now_wall` é o relógio de parede em ms, usado só para podar lápides velhas (nunca o relógio híbrido, que
+/// pode estar adiantado por causa de um aparelho com a hora errada).
+pub fn merge(store: &mut Store, remote: Option<&SyncFile>, device: &str, now_wall: i64) -> MergeOutcome {
     let mut changed_local = false;
     if let Some(r) = remote {
-        store.bump_clock(r.clock);
-        for t in &r.tasks {
-            store.bump_clock(t.stamps.latest());
-        }
-        for d in &r.deleted {
-            store.bump_clock(d.at);
-        }
-        for e in r.tags.values() {
-            store.bump_clock(e.at);
-        }
+        r.bump(store);
 
         for rt in &r.tasks {
             // Exclusão local depois da última edição remota: continua excluída (a lápide vai no arquivo).
@@ -243,8 +262,8 @@ pub fn merge(store: &mut Store, remote: Option<&SyncFile>, device: &str) -> Merg
         }
     }
 
-    // Lápides velhas saem (de todo mundo, no mesmo critério).
-    let horizon = store.clock - TOMBSTONE_MS;
+    // Lápides velhas saem, pelo relógio de parede: uma lápide "do futuro" (aparelho com a hora adiantada) fica.
+    let horizon = now_wall - TOMBSTONE_MS;
     let before = store.deleted.len();
     store.deleted.retain(|d| d.at >= horizon);
     changed_local |= store.deleted.len() != before;
@@ -252,6 +271,32 @@ pub fn merge(store: &mut Store, remote: Option<&SyncFile>, device: &str) -> Merg
     let file = SyncFile::from_store(store, device);
     let changed_file = remote.is_none_or(|r| !r.same_content(&file));
     MergeOutcome { changed_local, changed_file, file }
+}
+
+/// Primeira mesclagem com um arquivo que já existe: uma tarefa daqui sem par no arquivo e uma do arquivo sem par
+/// aqui, com o mesmo título, data e hora, são a mesma tarefa que ganhou `uid`s diferentes (um computador migrado
+/// de uma versão sem sincronização, um backup antigo restaurado). A daqui assume a do arquivo, inteira: o arquivo
+/// é o lado que já estava sincronizado. Sem isto, tudo apareceria em dobro.
+pub fn adopt_matches(store: &mut Store, remote: &SyncFile) -> bool {
+    let remote_uids: HashSet<&str> = remote.tasks.iter().map(|t| t.uid.as_str()).collect();
+    let key = |title: &str, date: Option<NaiveDate>, time: Option<NaiveTime>| (title.trim().to_owned(), date, time);
+    let mut changed = false;
+    for rt in &remote.tasks {
+        if store.find_uid(&rt.uid).is_some() {
+            continue;
+        }
+        let wanted = key(&rt.title, rt.date, rt.time);
+        let found = store.tasks.iter().position(|lt| !remote_uids.contains(lt.uid.as_str()) && key(&lt.title, lt.date, lt.time) == wanted);
+        if let Some(i) = found {
+            let id = store.tasks[i].id;
+            store.tasks[i] = rt.to_task(id);
+            changed = true;
+        }
+    }
+    if changed {
+        store.dirty = true;
+    }
+    changed
 }
 
 /// Pasta sugerida para a sincronização em cada nuvem: no OneDrive (e no Dropbox) a pasta de apps, que o celular
@@ -263,25 +308,159 @@ pub fn suggested_folder(cloud: &str, root: &Path) -> PathBuf {
     }
 }
 
-/// Grava `bytes` em `path` por um arquivo temporário e uma troca: a nuvem nunca vê um arquivo pela metade.
-pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+/// Grava `bytes` no próprio arquivo, sem trocá-lo por outro: no Google Drive um arquivo substituído por
+/// renomeação vira outro arquivo (outro id), e o celular, que guarda o id, ficaria preso ao antigo. A gravação
+/// é conferida lendo de volta; três tentativas. Um leitor que apanhe o arquivo no meio da gravação vê um JSON
+/// pela metade, e por isso toda leitura ilegível é repetida antes de valer (ver `BAD_READS`).
+pub fn write_same_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("Não foi possível criar a pasta de sincronização: {e}"))?;
     }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, bytes).map_err(|e| format!("Não foi possível gravar na pasta de sincronização: {e}"))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("Não foi possível concluir a gravação: {e}"))
+    let mut last_err = String::new();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        let written = (|| -> std::io::Result<()> {
+            let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(path)?;
+            f.write_all(bytes)?;
+            f.sync_all()
+        })();
+        match written {
+            Err(e) => last_err = format!("Não foi possível gravar na pasta de sincronização: {e}"),
+            Ok(()) => match std::fs::read(path) {
+                Ok(back) if back == bytes => return Ok(()),
+                Ok(_) => last_err = "A gravação na pasta de sincronização não conferiu ao ler de volta.".to_owned(),
+                Err(e) => last_err = format!("Não foi possível conferir a gravação: {e}"),
+            },
+        }
+    }
+    Err(last_err)
 }
 
-/// Põe de lado um arquivo ilegível, com a data no nome, e devolve o nome novo.
-fn quarantine(path: &Path) -> String {
-    let name = format!("N.avi.sync.corrompido-{}.json", Local::now().format("%Y%m%d-%H%M%S"));
-    let _ = std::fs::rename(path, path.with_file_name(&name));
-    name
+/// Guarda uma cópia de um arquivo ilegível, com a data no nome, e devolve o nome da cópia. Copia em vez de
+/// renomear: renomear levaria junto a identidade do arquivo na nuvem, e o celular passaria a gravar na cópia.
+fn quarantine_copy(path: &Path) -> Result<String, String> {
+    let name = format!("{FILE_STEM}{CORRUPT_MARK}{}.json", Local::now().format("%Y%m%d-%H%M%S"));
+    std::fs::copy(path, path.with_file_name(&name)).map(|_| name).map_err(|e| e.to_string())
+}
+
+/// Aproveita o que der de um arquivo ilegível (quase sempre um JSON truncado): as tarefas, lápides e tags que
+/// ainda se leem inteiras. Mesclar isso só acrescenta ou atualiza; nada local some por causa de um arquivo ruim.
+fn salvage(bytes: &[u8]) -> Option<SyncFile> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut file = SyncFile { schema: SCHEMA, ..Default::default() };
+    let mut any = false;
+    for item in array_items(&text, "\"tasks\"") {
+        match serde_json::from_str::<SyncTask>(item) {
+            Ok(t) if !t.uid.is_empty() => {
+                file.tasks.push(t);
+                any = true;
+            }
+            _ => break,
+        }
+    }
+    for item in array_items(&text, "\"deleted\"") {
+        match serde_json::from_str::<Tombstone>(item) {
+            Ok(d) => {
+                file.deleted.push(d);
+                any = true;
+            }
+            Err(_) => break,
+        }
+    }
+    if let Some(obj) = object_after(&text, "\"tags\"")
+        && let Ok(tags) = serde_json::from_str::<BTreeMap<String, TagEntry>>(obj)
+    {
+        any |= !tags.is_empty();
+        file.tags = tags;
+    }
+    any.then_some(file)
+}
+
+/// Os objetos `{...}` inteiros do array que vem depois de `key` no texto (para no primeiro incompleto).
+fn array_items<'a>(text: &'a str, key: &str) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    let Some(k) = text.find(key) else { return out };
+    let Some(open) = text[k..].find('[') else { return out };
+    let mut i = k + open + 1;
+    loop {
+        while let Some(c) = text[i..].chars().next() {
+            if c.is_whitespace() || c == ',' {
+                i += c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if !text[i..].starts_with('{') {
+            break;
+        }
+        let Some(end) = balanced_end(text, i) else { break };
+        out.push(&text[i..end]);
+        i = end;
+    }
+    out
+}
+
+/// O objeto `{...}` inteiro que vem depois de `key` no texto, se estiver completo.
+fn object_after<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let k = text.find(key)?;
+    let open = k + text[k..].find('{')?;
+    let end = balanced_end(text, open)?;
+    Some(&text[open..end])
+}
+
+/// Índice logo depois do `}` que fecha o objeto aberto em `start`, respeitando textos entre aspas.
+fn balanced_end(text: &str, start: usize) -> Option<usize> {
+    let (mut depth, mut in_str, mut esc) = (0usize, false, false);
+    for (i, &b) in text.as_bytes().iter().enumerate().skip(start) {
+        if in_str {
+            if esc {
+                esc = false;
+            } else if b == b'\\' {
+                esc = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_str = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn fnv(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// Uma cópia de conflito criada pela nuvem ao lado do arquivo: "N.avi.sync (1).json" (Google Drive),
+/// "N.avi.sync-NOMEDOPC.json" (OneDrive), "N.avi.sync (conflicted copy ...).json" (Dropbox).
+fn is_conflict_copy(name: &str) -> bool {
+    name != FILE_NAME && name.starts_with(FILE_STEM) && name.ends_with(".json") && !name.contains(CORRUPT_MARK)
+}
+
+/// Leva uma cópia de conflito já mesclada para a subpasta `conflitos/`, sem apagar nada.
+fn shelve(path: &Path) {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { return };
+    let target_dir = dir.join(CONFLICTS_DIR);
+    if std::fs::create_dir_all(&target_dir).is_err() {
+        return;
+    }
+    let mut target = target_dir.join(name);
+    if target.exists() {
+        target = target_dir.join(format!("{}-{}", Local::now().format("%Y%m%d-%H%M%S"), name.to_string_lossy()));
+    }
+    let _ = std::fs::rename(path, target);
 }
 
 /// O que a janela mostra sobre a sincronização.
@@ -296,14 +475,33 @@ pub enum Status {
 struct Read {
     /// `None`: o arquivo (ou a pasta) ainda não existe.
     bytes: Option<Vec<u8>>,
+    /// Cópias de conflito encontradas ao lado, com o conteúdo, em ordem de nome.
+    copies: Vec<(PathBuf, Vec<u8>)>,
 }
 
-fn read_file(path: &Path) -> Result<Read, String> {
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(Read { bytes: Some(bytes) }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Read { bytes: None }),
-        Err(e) => Err(format!("Não foi possível ler a pasta de sincronização: {e}")),
+fn read_folder(dir: &Path) -> Result<Read, String> {
+    let bytes = match std::fs::read(dir.join(FILE_NAME)) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("Não foi possível ler a pasta de sincronização: {e}")),
+    };
+    let mut copies = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if is_conflict_copy(&name)
+                && let Ok(b) = std::fs::read(entry.path())
+            {
+                copies.push((entry.path(), b));
+            }
+        }
     }
+    copies.sort();
+    Ok(Read { bytes, copies })
+}
+
+fn parse(bytes: &[u8]) -> Result<SyncFile, serde_json::Error> {
+    serde_json::from_slice::<SyncFile>(bytes)
 }
 
 /// A sincronização em andamento: lê e grava em segundo plano (a unidade da nuvem pode demorar) e mescla na
@@ -317,6 +515,11 @@ pub struct Sync {
     pending: bool,
     /// Hash do conteúdo do arquivo já mesclado ou gravado por aqui: igual, não há o que mesclar.
     seen: Option<u64>,
+    /// Leituras ilegíveis seguidas do mesmo conteúdo (download pela metade ou arquivo corrompido de vez).
+    bad_reads: u8,
+    bad_hash: Option<u64>,
+    /// A pessoa acabou de escolher a pasta: a primeira mesclagem casa tarefas iguais de `uid`s diferentes.
+    match_legacy: bool,
     last_ok: Option<NaiveDateTime>,
     error: Option<String>,
     /// Aviso que fica até a próxima leitura boa (arquivo ilegível posto de lado).
@@ -325,7 +528,19 @@ pub struct Sync {
 
 impl Sync {
     pub fn new() -> Self {
-        Self { reading: None, writing: None, next_check: FIRST_CHECK_SECS, pending: false, seen: None, last_ok: None, error: None, notice: None }
+        Self {
+            reading: None,
+            writing: None,
+            next_check: FIRST_CHECK_SECS,
+            pending: false,
+            seen: None,
+            bad_reads: 0,
+            bad_hash: None,
+            match_legacy: false,
+            last_ok: None,
+            error: None,
+            notice: None,
+        }
     }
 
     /// As tarefas locais acabaram de ser gravadas: o arquivo precisa delas.
@@ -338,6 +553,8 @@ impl Sync {
         self.pending = true;
         self.next_check = 0.0;
         self.seen = None;
+        self.bad_reads = 0;
+        self.match_legacy = true;
         self.error = None;
         self.notice = None;
     }
@@ -397,7 +614,7 @@ impl Sync {
             match rx.try_recv() {
                 Ok(Ok(read)) => {
                     self.reading = None;
-                    changed = self.apply(store, read, &dir.join(FILE_NAME), device);
+                    changed = self.apply(store, read, dir, device, time);
                 }
                 Ok(Err(e)) => {
                     self.reading = None;
@@ -407,30 +624,36 @@ impl Sync {
                 Err(TryRecvError::Disconnected) => self.reading = None,
             }
         }
-        if self.reading.is_none() && self.writing.is_none() && (self.pending || time >= self.next_check) {
+        // Com uma leitura ilegível em aberto, até uma mudança local espera a releitura marcada.
+        let due = (self.pending && self.bad_reads == 0) || time >= self.next_check;
+        if self.reading.is_none() && self.writing.is_none() && due {
             self.next_check = time + CHECK_SECS;
-            let path = dir.join(FILE_NAME);
+            let dir = dir.to_path_buf();
             let (tx, rx) = mpsc::channel();
             std::thread::spawn(move || {
-                let _ = tx.send(read_file(&path));
+                let _ = tx.send(read_folder(&dir));
             });
             self.reading = Some(rx);
         }
         changed
     }
 
-    /// Com o arquivo lido em mãos: mescla e, se preciso, grava.
-    fn apply(&mut self, store: &mut Store, read: Read, path: &Path, device: &str) -> bool {
+    /// Com a pasta lida em mãos: mescla (aqui, na thread da interface, sobre as tarefas atuais) e, se preciso,
+    /// grava. Devolve `true` se as tarefas locais mudaram.
+    fn apply(&mut self, store: &mut Store, read: Read, dir: &Path, device: &str, time: f64) -> bool {
+        let path = dir.join(FILE_NAME);
         let hash = read.bytes.as_deref().map(fnv);
-        if !self.pending && hash.is_some() && hash == self.seen {
+        if !self.pending && read.copies.is_empty() && hash.is_some() && hash == self.seen {
             // O mesmo conteúdo que já foi mesclado (ou que este app gravou): nada a fazer.
             self.last_ok = Some(Local::now().naive_local());
             self.error = None;
             return false;
         }
+        // O arquivo precisa ser regravado mesmo que a mesclagem não mude nada (não existe, ou foi posto de lado).
+        let mut rewrite = false;
         let remote = match &read.bytes {
             None => None,
-            Some(bytes) => match serde_json::from_slice::<SyncFile>(bytes) {
+            Some(bytes) => match parse(bytes) {
                 Ok(f) if f.schema > SCHEMA => {
                     self.error = Some(format!("O arquivo foi gravado por uma versão mais nova do {}. Atualize o app para sincronizar.", brand::NAME));
                     self.seen = hash;
@@ -438,29 +661,89 @@ impl Sync {
                 }
                 Ok(f) => {
                     self.notice = None;
+                    self.bad_reads = 0;
                     Some(f)
                 }
                 Err(e) => {
-                    let aside = quarantine(path);
-                    self.notice = Some(format!("O arquivo de sincronização estava ilegível ({e}). Ele foi posto de lado como {aside}, e um novo foi gravado com as tarefas deste computador."));
-                    None
+                    // Quase sempre é um download do cliente da nuvem pela metade: relê antes de concluir qualquer coisa.
+                    if hash != self.bad_hash {
+                        self.bad_hash = hash;
+                        self.bad_reads = 0;
+                    }
+                    self.bad_reads += 1;
+                    if self.bad_reads < BAD_READS {
+                        self.next_check = time + RETRY_SECS;
+                        return false;
+                    }
+                    self.bad_reads = 0;
+                    self.bad_hash = None;
+                    let saved = salvage(bytes);
+                    let kept = match quarantine_copy(&path) {
+                        Ok(name) => format!("Uma cópia dele ficou como {name}"),
+                        Err(err) => format!("Não deu para guardar uma cópia dele ({err})"),
+                    };
+                    let used = match &saved {
+                        Some(s) => format!("{} tarefa(s) legível(is) dele foram aproveitadas", s.tasks.len()),
+                        None => "nada dele pôde ser aproveitado".to_owned(),
+                    };
+                    self.notice = Some(format!("O arquivo de sincronização estava ilegível ({e}). {kept}, {used}, e ele foi regravado com as tarefas deste computador."));
+                    rewrite = true;
+                    saved
                 }
             },
         };
-        let outcome = merge(store, remote.as_ref(), device);
+
+        // Uma edição feita e ainda não gravada ganha carimbo antes de mesclar, com o relógio já adiantado pelo
+        // arquivo: é a mudança mais recente e não pode perder para o que veio de fora.
+        if let Some(r) = &remote {
+            r.bump(store);
+        }
+        if store.dirty {
+            store.stamp_changes();
+        }
+        let now = Utc::now().timestamp_millis();
+        let mut changed_local = false;
+        if let Some(r) = &remote
+            && (self.match_legacy || !store.synced_once)
+        {
+            changed_local |= adopt_matches(store, r);
+        }
+        changed_local |= merge(store, remote.as_ref(), device, now).changed_local;
+        let mut shelved = Vec::new();
+        for (copy_path, bytes) in &read.copies {
+            // Ilegível (talvez ainda baixando) ou de uma versão mais nova: fica para uma próxima leitura.
+            if let Ok(f) = parse(bytes)
+                && f.schema <= SCHEMA
+            {
+                changed_local |= merge(store, Some(&f), device, now).changed_local;
+                shelved.push(copy_path.clone());
+            }
+        }
+        if !store.synced_once {
+            store.synced_once = true;
+            changed_local = true;
+        }
+        self.match_legacy = false;
         self.pending = false;
-        if outcome.changed_local {
+        if changed_local {
             store.dirty = true;
         }
+        // O estado mesclado passa a ser a referência: o que veio de fora não é recarimbado como edição daqui.
         store.mark_synced();
-        if remote.is_none() || outcome.changed_file {
-            match serde_json::to_vec_pretty(&outcome.file) {
+
+        let file = SyncFile::from_store(store, device);
+        let changed_file = rewrite || remote.as_ref().is_none_or(|r| !r.same_content(&file));
+        if changed_file {
+            match serde_json::to_vec_pretty(&file) {
                 Ok(json) => {
                     self.seen = Some(fnv(&json));
-                    let path = path.to_path_buf();
                     let (tx, rx) = mpsc::channel();
                     std::thread::spawn(move || {
-                        let _ = tx.send(write_atomic(&path, &json));
+                        let result = write_same_file(&path, &json);
+                        for p in &shelved {
+                            shelve(p);
+                        }
+                        let _ = tx.send(result);
                     });
                     self.writing = Some(rx);
                 }
@@ -470,8 +753,15 @@ impl Sync {
             self.seen = hash;
             self.last_ok = Some(Local::now().naive_local());
             self.error = None;
+            if !shelved.is_empty() {
+                std::thread::spawn(move || {
+                    for p in &shelved {
+                        shelve(p);
+                    }
+                });
+            }
         }
-        outcome.changed_local
+        changed_local
     }
 
     /// Ao fechar o app: espera a gravação em andamento e manda o que ainda falta, tudo na hora (sem threads).
@@ -480,25 +770,52 @@ impl Sync {
             let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
         }
         self.reading = None;
-        if !self.pending && store.dirty {
+        if store.dirty {
+            store.stamp_changes();
             self.pending = true;
         }
         if !self.pending {
             return;
         }
         let path = dir.join(FILE_NAME);
-        let Ok(read) = read_file(&path) else { return };
-        let remote = read.bytes.as_deref().and_then(|b| serde_json::from_slice::<SyncFile>(b).ok()).filter(|f| f.schema <= SCHEMA);
+        let Ok(read) = read_folder(dir) else { return };
+        let remote = read.bytes.as_deref().and_then(|b| parse(b).ok()).filter(|f| f.schema <= SCHEMA);
         if read.bytes.is_some() && remote.is_none() {
             // Ilegível ou de uma versão mais nova: não é hora de mexer nele.
             return;
         }
-        let outcome = merge(store, remote.as_ref(), device);
+        let now = Utc::now().timestamp_millis();
+        let mut changed_local = false;
+        if let Some(r) = &remote {
+            r.bump(store);
+            if self.match_legacy || !store.synced_once {
+                changed_local |= adopt_matches(store, r);
+            }
+        }
+        changed_local |= merge(store, remote.as_ref(), device, now).changed_local;
+        for (copy_path, bytes) in &read.copies {
+            if let Ok(f) = parse(bytes)
+                && f.schema <= SCHEMA
+            {
+                changed_local |= merge(store, Some(&f), device, now).changed_local;
+                shelve(copy_path);
+            }
+        }
+        if !store.synced_once {
+            store.synced_once = true;
+            changed_local = true;
+        }
         store.mark_synced();
-        if (remote.is_none() || outcome.changed_file)
-            && let Ok(json) = serde_json::to_vec_pretty(&outcome.file)
+        let file = SyncFile::from_store(store, device);
+        if remote.as_ref().is_none_or(|r| !r.same_content(&file))
+            && let Ok(json) = serde_json::to_vec_pretty(&file)
         {
-            let _ = write_atomic(&path, &json);
+            let _ = write_same_file(&path, &json);
+        }
+        if changed_local {
+            // O que entrou na saída fica gravado aqui também, senão voltaria a ser mesclado na próxima abertura.
+            store.dirty = true;
+            store.save();
         }
         self.pending = false;
     }
@@ -508,10 +825,15 @@ impl Sync {
 mod tests {
     use super::*;
 
+    /// Relógio de parede dos testes, perto dos carimbos usados neles.
+    const NOW: i64 = 1_764_001_000_000;
+
     /// Um `Store` montado a partir de um arquivo de sincronização (como se ele tivesse sido lido numa máquina vazia).
+    /// Com relógio de parede zero, nenhuma lápide do arquivo é podada ao montar.
     fn store_from(file: &SyncFile) -> Store {
         let mut s = Store::default();
-        merge(&mut s, Some(file), "teste");
+        merge(&mut s, Some(file), "teste", 0);
+        s.synced_once = true;
         s.mark_synced();
         s.dirty = false;
         s
@@ -529,22 +851,64 @@ mod tests {
         SyncFile { schema: SCHEMA, tasks, deleted, ..Default::default() }
     }
 
+    fn json(f: &SyncFile) -> Vec<u8> {
+        serde_json::to_vec_pretty(f).unwrap()
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("navi_sync_teste_{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    }
+
+    /// Roda a sincronização até ela ficar parada, avançando o relógio da interface `step` s por quadro.
+    fn run(s: &mut Sync, st: &mut Store, dir: &Path, who: &str, time: &mut f64, step: f64) {
+        let mut idle = 0;
+        for _ in 0..3000 {
+            *time += step;
+            s.tick(st, Some(dir), who, *time);
+            if s.reading.is_none() && s.writing.is_none() {
+                idle += 1;
+                if idle > 3 {
+                    break;
+                }
+            } else {
+                idle = 0;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
     #[test]
     fn casos_de_mesclagem_compartilhados() {
         // Os mesmos casos que o N.avi do celular vai rodar (docs/sync-casos/mesclagem.json).
         let doc: serde_json::Value = serde_json::from_str(include_str!("../docs/sync-casos/mesclagem.json")).unwrap();
+        let default_now = doc["agora"].as_i64().unwrap();
         let mut n = 0;
         for case in doc["casos"].as_array().unwrap() {
             let name = case["nome"].as_str().unwrap();
             let local: SyncFile = serde_json::from_value(case["local"].clone()).unwrap();
             let remote: Option<SyncFile> = serde_json::from_value(case["remoto"].clone()).unwrap();
             let expected: SyncFile = serde_json::from_value(case["esperado"].clone()).unwrap();
+            let now = case["agora"].as_i64().unwrap_or(default_now);
             let mut store = store_from(&local);
-            let out = merge(&mut store, remote.as_ref(), "teste");
+            if case["primeira_vez"].as_bool() == Some(true)
+                && let Some(r) = &remote
+            {
+                adopt_matches(&mut store, r);
+            }
+            let out = merge(&mut store, remote.as_ref(), "teste", now);
             assert!(out.file.same_content(&expected), "{name}: esperado {expected:?}, veio {:?}", out.file);
             n += 1;
         }
-        assert!(n >= 7);
+        assert!(n >= 9, "{n} casos lidos");
     }
 
     #[test]
@@ -553,8 +917,8 @@ mod tests {
         let b = file(vec![task("x", "Pão francês", 250), task("z", "Ovos", 150)], vec![]);
         let mut ab = store_from(&a);
         let mut ba = store_from(&b);
-        merge(&mut ab, Some(&b), "1");
-        merge(&mut ba, Some(&a), "2");
+        merge(&mut ab, Some(&b), "1", 1000);
+        merge(&mut ba, Some(&a), "2", 1000);
         let (fa, fb) = (SyncFile::from_store(&ab, "1"), SyncFile::from_store(&ba, "2"));
         assert!(fa.same_content(&fb), "{fa:?} vs {fb:?}");
         assert_eq!(fa.tasks.iter().find(|t| t.uid == "x").unwrap().title, "Pão francês");
@@ -567,11 +931,11 @@ mod tests {
         let mut s = store_from(&file(vec![task("a", "A", 100)], vec![]));
         s.remove_uid("a");
         s.deleted.push(Tombstone { uid: "a".into(), at: 500 });
-        let out = merge(&mut s, Some(&file(vec![task("a", "A editada", 400)], vec![])), "t");
+        let out = merge(&mut s, Some(&file(vec![task("a", "A editada", 400)], vec![])), "t", 1000);
         assert!(s.find_uid("a").is_none() && out.file.deleted.len() == 1);
         // Editada aqui depois de excluída lá: volta a valer, sem lápide.
         let mut s = store_from(&file(vec![task("b", "B", 600)], vec![]));
-        let out = merge(&mut s, Some(&file(vec![], vec![Tombstone { uid: "b".into(), at: 550 }])), "t");
+        let out = merge(&mut s, Some(&file(vec![], vec![Tombstone { uid: "b".into(), at: 550 }])), "t", 1000);
         assert!(s.find_uid("b").is_some() && out.file.deleted.is_empty());
     }
 
@@ -584,76 +948,253 @@ mod tests {
         assert!(s.tasks[i].stamps.title > 1_764_000_000_000);
         assert_eq!(s.tasks[i].stamps.notes, 1_764_000_000_000, "só o título mudou");
         let remote = file(vec![task("a", "A", 1_764_000_000_000)], vec![]);
-        let out = merge(&mut s, Some(&remote), "t");
+        let out = merge(&mut s, Some(&remote), "t", NOW);
         assert!(out.changed_file && !out.changed_local);
         assert_eq!(out.file.tasks[0].title, "A nova");
     }
 
     #[test]
-    fn lapides_velhas_saem() {
-        let now = 1_764_000_000_000;
-        let mut s = store_from(&file(vec![task("a", "A", now)], vec![Tombstone { uid: "velha".into(), at: now - TOMBSTONE_MS - 1 }, Tombstone { uid: "nova".into(), at: now - 1000 }]));
-        let out = merge(&mut s, None, "t");
-        let uids: Vec<&str> = out.file.deleted.iter().map(|d| d.uid.as_str()).collect();
-        assert_eq!(uids, ["nova"]);
+    fn mesclar_nao_recarimba_o_que_veio_de_fora() {
+        // Furo 4 da auditoria: B recebe "X"@200 e o regrava; se o recarimbasse, "X" venceria uma edição mais nova de C.
+        let mut s = store_from(&file(vec![], vec![]));
+        let remote = file(vec![task("a", "X", 1_764_000_000_200)], vec![]);
+        merge(&mut s, Some(&remote), "b", NOW);
+        s.mark_synced();
+        s.save();
+        let t = &s.tasks[s.find_uid("a").unwrap()];
+        assert_eq!(t.stamps.title, 1_764_000_000_200, "gravar depois de mesclar não gera carimbo novo");
+        // E uma edição local de verdade continua ganhando carimbo.
+        let i = s.find_uid("a").unwrap();
+        s.tasks[i].notes = "anotação".into();
+        s.save();
+        assert!(s.tasks[i].stamps.notes > 1_764_000_000_200);
+        assert_eq!(s.tasks[i].stamps.title, 1_764_000_000_200);
     }
 
     #[test]
-    fn arquivo_corrompido_e_posto_de_lado_e_substituido() {
-        let dir = std::env::temp_dir().join("navi_sync_teste_corrompido");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    fn lapides_velhas_saem_pelo_relogio_de_parede() {
+        let mut s = store_from(&file(
+            vec![task("a", "A", NOW)],
+            vec![
+                Tombstone { uid: "velha".into(), at: NOW - TOMBSTONE_MS - 1 },
+                Tombstone { uid: "nova".into(), at: NOW - 1000 },
+                Tombstone { uid: "do_futuro".into(), at: NOW + 10 * 24 * 3600 * 1000 },
+            ],
+        ));
+        // Um aparelho com a hora muito adiantada empurrou o relógio híbrido para o futuro: isso não pode podar nada.
+        s.bump_clock(NOW + 400 * 24 * 3600 * 1000);
+        let out = merge(&mut s, None, "t", NOW);
+        let mut uids: Vec<&str> = out.file.deleted.iter().map(|d| d.uid.as_str()).collect();
+        uids.sort();
+        assert_eq!(uids, ["do_futuro", "nova"]);
+    }
+
+    #[test]
+    fn desfazer_exclusao_vence_a_lapide() {
+        // Furo 7: excluir, gravar (vira lápide, que já pode ter ido ao arquivo), desfazer.
+        let mut s = store_from(&file(vec![task("a", "Dentista", 100)], vec![]));
+        let t = s.tasks[0].clone();
+        s.remove(t.id);
+        s.save();
+        assert_eq!(s.deleted.len(), 1);
+        let tomb_at = s.deleted[0].at;
+        s.restore(t, 0);
+        assert!(s.deleted.is_empty(), "desfazer tira a lápide");
+        assert!(s.tasks[0].stamps.latest() > tomb_at, "e a tarefa volta carimbada depois da exclusão");
+        // A lápide já estava no arquivo: a tarefa restaurada sobrevive à mesclagem e a lápide cai do arquivo.
+        let out = merge(&mut s, Some(&file(vec![], vec![Tombstone { uid: "a".into(), at: tomb_at }])), "t", NOW);
+        assert_eq!(s.tasks.len(), 1);
+        assert!(out.file.deleted.is_empty());
+    }
+
+    #[test]
+    fn primeira_entrada_casa_tarefas_iguais_sem_duplicar() {
+        // Furo 12: um computador migrado (uids próprios) entra num arquivo que já tem as mesmas tarefas.
+        let date = NaiveDate::from_ymd_opt(2026, 12, 5);
+        let mut local = Store::default();
+        let id = local.add("Aluguel".into(), date);
+        local.add("Só daqui".into(), None);
+        local.save();
+        assert!(!local.synced_once);
+        let mut r1 = task("r-1", "Aluguel", 1_764_000_000_100);
+        r1.date = date;
+        r1.notes = "pagar pelo app".into();
+        let remote = file(vec![r1, task("r-2", "Dentista", 1_764_000_000_100)], vec![]);
+        assert!(adopt_matches(&mut local, &remote));
+        let out = merge(&mut local, Some(&remote), "t", NOW);
+        assert_eq!(local.tasks.len(), 3, "Aluguel não dobrou");
+        let aluguel = &local.tasks[local.tasks.iter().position(|t| t.id == id).unwrap()];
+        assert_eq!((aluguel.uid.as_str(), aluguel.notes.as_str()), ("r-1", "pagar pelo app"), "assume a do arquivo, com o id local");
+        assert_eq!(out.file.tasks.len(), 3);
+        // Depois da primeira vez, duas tarefas iguais criadas de lados diferentes são mesmo duas.
+        let mut again = store_from(&out.file);
+        again.add("Dentista".into(), None);
+        again.save();
+        let remote2 = file(vec![task("r-9", "Dentista", NOW)], vec![]);
+        assert!(!adopt_matches(&mut Store::default(), &file(vec![], vec![])), "sem nada a casar");
+        merge(&mut again, Some(&remote2), "t", NOW);
+        assert_eq!(again.tasks.iter().filter(|t| t.title == "Dentista").count(), 3);
+    }
+
+    #[test]
+    fn edicao_nao_gravada_nao_e_sobrescrita_pela_mesclagem() {
+        // Furo 3: a pessoa digitou e ainda não gravou; o arquivo traz um título mais novo que o último carimbo.
+        let dir = temp_dir("digitando");
+        let stamp = Utc::now().timestamp_millis() - 60_000;
+        let mut store = store_from(&file(vec![task("a", "Original", stamp)], vec![]));
+        let mut other = task("a", "Do celular", stamp + 5_000);
+        other.notes = "nota do celular".into();
+        std::fs::write(dir.join(FILE_NAME), json(&file(vec![other], vec![]))).unwrap();
+        store.tasks[0].title = "Digitado agora".into();
+        store.dirty = true;
+        let mut sync = Sync::new();
+        sync.kick();
+        let mut time = 0.0;
+        run(&mut sync, &mut store, &dir, "pc", &mut time, 0.05);
+        assert_eq!(store.tasks[0].title, "Digitado agora", "o que foi digitado fica");
+        assert_eq!(store.tasks[0].notes, "nota do celular", "e o que veio de fora em outro grupo entra");
+        let written = parse(&std::fs::read(dir.join(FILE_NAME)).unwrap()).unwrap();
+        assert_eq!(written.tasks[0].title, "Digitado agora");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn gravar_mantem_o_mesmo_arquivo() {
+        // Furo 1: regravar o conteúdo, não trocar o arquivo (no Drive a troca vira outro id).
+        let dir = temp_dir("mesmo_arquivo");
         let path = dir.join(FILE_NAME);
-        std::fs::write(&path, b"{ isto nao e json").unwrap();
+        std::fs::write(&path, b"antigo").unwrap();
+        let created = std::fs::metadata(&path).unwrap().created().ok();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        write_same_file(&path, b"novo conteudo, maior que o antigo").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"novo conteudo, maior que o antigo");
+        assert_eq!(std::fs::metadata(&path).unwrap().created().ok(), created, "é o mesmo arquivo de antes");
+        assert_eq!(names(&dir), [FILE_NAME], "sem arquivo temporário sobrando");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn arquivo_pela_metade_e_relido_antes_de_ser_posto_de_lado() {
+        // Furo 2: um download pela metade não é "corrompido"; se completar a tempo, é mesclado normalmente.
+        let dir = temp_dir("pela_metade");
+        let path = dir.join(FILE_NAME);
+        let full = json(&file(vec![task("c", "Do celular", 100)], vec![]));
+        std::fs::write(&path, &full[..full.len() / 2]).unwrap();
+        let mut store = store_from(&file(vec![task("a", "Minha", 100)], vec![]));
+        let mut sync = Sync::new();
+        sync.kick();
+        let mut time = 0.0;
+        run(&mut sync, &mut store, &dir, "pc", &mut time, 0.05);
+        assert_eq!(sync.bad_reads, 1, "uma leitura ruim, ainda sem conclusão");
+        assert_eq!(names(&dir), [FILE_NAME], "nada foi posto de lado nem regravado");
+        assert_eq!(std::fs::read(&path).unwrap(), &full[..full.len() / 2]);
+        // O download termina antes da releitura marcada.
+        std::fs::write(&path, &full).unwrap();
+        time += RETRY_SECS;
+        run(&mut sync, &mut store, &dir, "pc", &mut time, 0.5);
+        assert_eq!(store.tasks.len(), 2, "o conteúdo completo foi mesclado");
+        assert_eq!(sync.bad_reads, 0);
+        assert!(sync.notice.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn arquivo_corrompido_de_vez_e_copiado_aproveitado_e_regravado_no_lugar() {
+        let dir = temp_dir("corrompido");
+        let path = dir.join(FILE_NAME);
+        // Truncado no meio da segunda tarefa: a primeira ainda se lê inteira.
+        let full = String::from_utf8(json(&file(vec![task("c1", "Inteira", 100), task("c2", "Cortada", 100)], vec![]))).unwrap();
+        let cut = full.find("Cortada").unwrap() + 3;
+        std::fs::write(&path, &full.as_bytes()[..cut]).unwrap();
+        let created = std::fs::metadata(&path).unwrap().created().ok();
         let mut store = store_from(&file(vec![task("a", "Minha tarefa", 100)], vec![]));
         let mut sync = Sync::new();
         sync.kick();
         let mut time = 0.0;
-        for _ in 0..400 {
-            time += 0.05;
-            sync.tick(&mut store, Some(&dir), "pc", time);
-            if matches!(sync.status(true), Status::Error(_)) && sync.writing.is_none() && sync.reading.is_none() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+        for _ in 0..BAD_READS {
+            run(&mut sync, &mut store, &dir, "pc", &mut time, 0.5);
         }
         let Status::Error(msg) = sync.status(true) else { panic!("devia avisar do arquivo ilegível: {:?}", sync.status(true)) };
-        assert!(msg.contains("ilegível"), "{msg}");
-        let names: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(msg.contains("ilegível") && msg.contains("1 tarefa(s)"), "{msg}");
+        let names = names(&dir);
         assert!(names.iter().any(|n| n.starts_with("N.avi.sync.corrompido-")), "{names:?}");
-        let written: SyncFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(names.contains(&FILE_NAME.to_owned()), "o arquivo original continua no lugar: {names:?}");
+        assert_eq!(std::fs::metadata(&path).unwrap().created().ok(), created, "e é o mesmo arquivo");
+        let written = parse(&std::fs::read(&path).unwrap()).unwrap();
+        let mut titles: Vec<&str> = written.tasks.iter().map(|t| t.title.as_str()).collect();
+        titles.sort();
+        assert_eq!(titles, ["Inteira", "Minha tarefa"], "a tarefa legível foi aproveitada e nada local foi apagado");
+        assert_eq!(store.tasks.len(), 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn lixo_sem_nada_aproveitavel_tambem_e_posto_de_lado() {
+        let dir = temp_dir("lixo");
+        std::fs::write(dir.join(FILE_NAME), b"{ isto nao e json").unwrap();
+        let mut store = store_from(&file(vec![task("a", "Minha tarefa", 100)], vec![]));
+        let mut sync = Sync::new();
+        sync.kick();
+        let mut time = 0.0;
+        for _ in 0..BAD_READS {
+            run(&mut sync, &mut store, &dir, "pc", &mut time, 0.5);
+        }
+        let Status::Error(msg) = sync.status(true) else { panic!("{:?}", sync.status(true)) };
+        assert!(msg.contains("nada dele pôde ser aproveitado"), "{msg}");
+        let written = parse(&std::fs::read(dir.join(FILE_NAME)).unwrap()).unwrap();
         assert_eq!(written.tasks.len(), 1);
-        assert_eq!(written.tasks[0].title, "Minha tarefa");
         assert_eq!(store.tasks.len(), 1, "nada local foi apagado");
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
+    fn aproveitamento_respeita_chaves_dentro_de_textos() {
+        let mut t = task("x", "Título com } e \"aspas\" e [colchete", 7);
+        t.notes = "{\"tasks\": [ falso ]".into();
+        let full = json(&file(vec![t, task("y", "Outra", 8)], vec![Tombstone { uid: "z".into(), at: 9 }]));
+        let cut = &full[..full.len() - 3];
+        let saved = salvage(cut).unwrap();
+        assert_eq!(saved.tasks.len(), 2);
+        assert_eq!(saved.tasks[0].title, "Título com } e \"aspas\" e [colchete");
+        assert_eq!(saved.deleted.len(), 1);
+    }
+
+    #[test]
+    fn copias_de_conflito_sao_mescladas_e_guardadas() {
+        // Furo 5: "N.avi.sync (1).json" (Google) e "N.avi.sync-PC.json" (OneDrive) entram e vão para conflitos/.
+        let dir = temp_dir("conflitos");
+        std::fs::write(dir.join(FILE_NAME), json(&file(vec![task("x", "Principal", 100)], vec![]))).unwrap();
+        std::fs::write(dir.join("N.avi.sync (1).json"), json(&file(vec![task("y", "Da cópia do Google", 100)], vec![]))).unwrap();
+        std::fs::write(dir.join("N.avi.sync-NOTEBOOK.json"), json(&file(vec![task("z", "Da cópia do OneDrive", 100)], vec![]))).unwrap();
+        std::fs::write(dir.join("N.avi.sync.corrompido-20260101-000000.json"), b"{").unwrap();
+        let mut store = store_from(&file(vec![], vec![]));
+        let mut sync = Sync::new();
+        sync.kick();
+        let mut time = 0.0;
+        run(&mut sync, &mut store, &dir, "pc", &mut time, 0.05);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(store.tasks.len(), 3);
+        let written = parse(&std::fs::read(dir.join(FILE_NAME)).unwrap()).unwrap();
+        assert_eq!(written.tasks.len(), 3, "o arquivo principal recebeu tudo");
+        assert_eq!(names(&dir), ["N.avi.sync.corrompido-20260101-000000.json", FILE_NAME, CONFLICTS_DIR], "a cópia corrompida não é cópia de conflito e fica");
+        assert_eq!(names(&dir.join(CONFLICTS_DIR)), ["N.avi.sync (1).json", "N.avi.sync-NOTEBOOK.json"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn dois_computadores_convergem_pelo_arquivo() {
-        let dir = std::env::temp_dir().join("navi_sync_teste_dois");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = temp_dir("dois");
         let mut a = store_from(&file(vec![task("x", "Do primeiro", 100)], vec![]));
         let mut b = store_from(&file(vec![task("y", "Do segundo", 200)], vec![]));
         let (mut sa, mut sb) = (Sync::new(), Sync::new());
+        let (mut ta, mut tb) = (0.0, 0.0);
         sa.kick();
-        let run = |s: &mut Sync, st: &mut Store, who: &str| {
-            let mut time = 0.0;
-            for _ in 0..300 {
-                time += 0.05;
-                s.tick(st, Some(&dir), who, time);
-                if s.reading.is_none() && s.writing.is_none() && time > 0.2 {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-        };
-        run(&mut sa, &mut a, "a");
+        run(&mut sa, &mut a, &dir, "a", &mut ta, 0.05);
         sb.kick();
-        run(&mut sb, &mut b, "b");
+        run(&mut sb, &mut b, &dir, "b", &mut tb, 0.05);
         assert_eq!(b.tasks.len(), 2, "o segundo recebeu a tarefa do primeiro");
         sa.kick();
-        run(&mut sa, &mut a, "a");
+        run(&mut sa, &mut a, &dir, "a", &mut ta, 0.05);
         assert_eq!(a.tasks.len(), 2, "e o primeiro recebeu a do segundo");
         assert!(SyncFile::from_store(&a, "a").same_content(&SyncFile::from_store(&b, "b")));
         let _ = std::fs::remove_dir_all(dir);
@@ -664,5 +1205,7 @@ mod tests {
         let root = Path::new("C:\\Nuvem");
         assert_eq!(suggested_folder("OneDrive", root), Path::new("C:\\Nuvem\\Apps\\N.avi"));
         assert_eq!(suggested_folder("Google Drive", root), Path::new("C:\\Nuvem\\N.avi"));
+        assert!(is_conflict_copy("N.avi.sync (1).json") && is_conflict_copy("N.avi.sync-PC.json"));
+        assert!(!is_conflict_copy(FILE_NAME) && !is_conflict_copy("N.avi.sync.corrompido-20260101-000000.json"));
     }
 }
