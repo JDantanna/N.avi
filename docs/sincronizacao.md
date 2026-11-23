@@ -35,8 +35,22 @@ tags: o uso dos programas (Monitoramento) não entra por enquanto.
 ```
 
 - `schema`: versão do formato. Quem lê um `schema` maior que o seu não grava nada e pede atualização.
-- `repeat`: `"None" | "Daily" | "Weekly" | "Monthly" | "Yearly"`; datas como `AAAA-MM-DD`, horas como `HH:MM:SS`.
+- `repeat`: `"None" | "Daily" | "Weekly" | "Monthly" | "Yearly"`.
 - Tag com `color: null` é uma cor removida (a remoção também precisa chegar aos outros aparelhos).
+
+### Identidade das tarefas
+
+Cada aparelho numera as tarefas com um inteiro sequencial (`next_id`), e dois aparelhos criam o mesmo `7` ao mesmo
+tempo. Por isso o inteiro **fica na máquina** (é a alça da interface e do arquivo local) e **não sai no arquivo de
+sincronização**; o que identifica a tarefa entre aparelhos é o `uid`: 32 dígitos hexadecimais, 128 bits aleatórios,
+gerado ao criar a tarefa (`model::fresh_uid` no desktop, `novoUid()` com `crypto.getRandomValues` no web). Migração:
+no primeiro carregamento de um arquivo antigo, cada tarefa sem `uid` ganha um; uma tarefa que chega de outro
+aparelho recebe um `id` local novo ao entrar. Nada que já existe muda de número.
+
+### Datas e horas
+
+Sempre como texto, sem fuso: datas `AAAA-MM-DD` e horas `HH:MM:SS` (o desktop grava assim por padrão; o web
+completa `HH:MM` para `HH:MM:SS` ao gravar). Carimbos são inteiros em ms Unix, nunca datas.
 
 ## Carimbos: um relógio que não anda para trás
 
@@ -103,13 +117,16 @@ o app avisa, e grava o estado dele no lugar. Nada do aparelho é apagado por cau
 
 ## Mesma lógica nos dois lados
 
-O celular precisa de recorrência (`occurs_on`, `roll_over`) e de mesclagem iguais às do Rust, senão uma tarefa
-mensal cai em dias diferentes em cada aparelho. Em vez de portar o Rust para WASM (que pesaria e exigiria uma
-ponte para o DOM), as duas implementações compartilham **casos de teste em JSON**, em `docs/sync-casos/`:
+O web é JavaScript puro, sem compilação. A recorrência (`occurs_on`, `next_after`, `roll_over`, `overdue`) foi
+portada para `web/js/recorrencia.js`, e a mesclagem seguirá o mesmo caminho. Para as duas pontas nunca divergirem
+(uma tarefa mensal caindo em dias diferentes em cada aparelho), elas rodam **os mesmos vetores de teste em JSON**:
 
-- `mesclagem.json`: estado local, estado remoto e o resultado esperado da mesclagem;
-- `recorrencia.json`: tarefas recorrentes com os dias em que caem, os em que não caem e o que acontece ao concluir.
+- `web/tests/vetores-recorrencia.json`: em que dias cada tarefa recorrente cai, a data seguinte a uma ocorrência,
+  o que acontece ao concluir (`reagendar` / `roll_over_on(hoje)`, com `hoje` sempre dado, nunca lido do relógio)
+  e quando uma tarefa está atrasada (sem `time` só no dia seguinte, com `time` quando a hora passa).
+  Rodado por `web/tests/logica.test.mjs` e por `model.rs` (`recorrencia_segue_os_vetores_compartilhados_com_o_web`).
+- `docs/sync-casos/mesclagem.json`: estado local, estado remoto e o resultado esperado da mesclagem. Rodado por
+  `src/sync.rs` hoje e pelo web quando a mesclagem chegar lá.
 
-Os testes do Rust (`src/sync.rs`, `src/model.rs`) leem esses arquivos; o PWA fará o mesmo com os mesmos arquivos.
 Um caso novo entra primeiro no JSON e só então nas duas implementações. Se um dia a lógica crescer, o WASM continua
 possível: a mesclagem e a recorrência já são funções puras, sem Windows nem interface.

@@ -866,34 +866,54 @@ mod tests {
         assert_eq!(s.clock, b, "um carimbo menor não o puxa para trás");
     }
 
+    /// Os mesmos vetores que o app web roda (`web/tests/vetores-recorrencia.json`): se uma ponta mudar a regra,
+    /// a outra quebra aqui antes de divergirem nos aparelhos.
     #[test]
-    fn recorrencia_e_conclusao_seguem_os_casos_compartilhados() {
-        // Os mesmos casos que o N.avi do celular vai rodar (docs/sync-casos/recorrencia.json).
-        let text = include_str!("../docs/sync-casos/recorrencia.json");
-        let doc: serde_json::Value = serde_json::from_str(text).unwrap();
+    fn recorrencia_segue_os_vetores_compartilhados_com_o_web() {
+        let doc: serde_json::Value = serde_json::from_str(include_str!("../web/tests/vetores-recorrencia.json")).unwrap();
         let day = |v: &serde_json::Value| NaiveDate::parse_from_str(v.as_str().unwrap(), "%Y-%m-%d").unwrap();
+        let task = |v: &serde_json::Value| -> Task {
+            let sync: crate::sync::SyncTask = serde_json::from_value(v.clone()).unwrap();
+            sync.to_task(1)
+        };
+        let items = |key: &str| doc[key].as_array().unwrap_or_else(|| panic!("seção {key} nos vetores")).iter();
+
         let mut n = 0;
-        for case in doc["casos"].as_array().unwrap() {
-            let name = case["nome"].as_str().unwrap();
-            let sync: crate::sync::SyncTask = serde_json::from_value(case["tarefa"].clone()).unwrap();
-            let mut t = sync.to_task(1);
-            for d in case["ocorre_em"].as_array().into_iter().flatten() {
+        for case in items("ocorre_em") {
+            let (name, t) = (case["nome"].as_str().unwrap(), task(&case["tarefa"]));
+            for d in case["sim"].as_array().unwrap() {
                 assert!(t.occurs_on(day(d)), "{name}: devia ocorrer em {d}");
             }
-            for d in case["nao_ocorre_em"].as_array().into_iter().flatten() {
+            for d in case["nao"].as_array().unwrap() {
                 assert!(!t.occurs_on(day(d)), "{name}: não devia ocorrer em {d}");
-            }
-            if let Some(c) = case.get("concluir") {
-                t.done = true;
-                t.roll_over_on(day(&c["hoje"]));
-                let after = &c["depois"];
-                assert_eq!(t.date, Some(day(&after["date"])), "{name}: data depois de concluir");
-                assert_eq!(t.done, after["done"].as_bool().unwrap(), "{name}: concluída depois");
-                assert_eq!(t.repeat_times, after["repeat_times"].as_u64().map(|n| n as u32), "{name}: vezes restantes");
             }
             n += 1;
         }
-        assert!(n >= 9, "os casos foram lidos");
+        for case in items("proxima_apos") {
+            let (name, t) = (case["nome"].as_str().unwrap(), task(&case["tarefa"]));
+            assert_eq!(t.next_after(day(&case["de"])), day(&case["para"]), "{name}");
+            n += 1;
+        }
+        for case in items("reagendar") {
+            let (name, hoje) = (case["nome"].as_str().unwrap(), day(&case["hoje"]));
+            for passo in case["passos"].as_array().unwrap() {
+                let mut t = task(&passo["tarefa"]);
+                let did = t.roll_over_on(hoje);
+                let e = &passo["esperado"];
+                assert_eq!(did, e["reagendou"].as_bool().unwrap(), "{name}: reagendou");
+                assert_eq!(t.date, Some(day(&e["date"])), "{name}: data");
+                assert_eq!(t.done, e["done"].as_bool().unwrap(), "{name}: concluída");
+                assert_eq!(t.repeat_times, e["repeat_times"].as_u64().map(|n| n as u32), "{name}: vezes restantes");
+            }
+            n += 1;
+        }
+        for case in items("atrasada") {
+            let name = case["nome"].as_str().unwrap();
+            let now = NaiveDateTime::parse_from_str(case["agora"].as_str().unwrap(), "%Y-%m-%dT%H:%M:%S").unwrap();
+            assert_eq!(task(&case["tarefa"]).overdue(now), case["esperado"].as_bool().unwrap(), "{name}");
+            n += 1;
+        }
+        assert!(n >= 20, "os vetores foram lidos ({n})");
     }
 
     #[test]
