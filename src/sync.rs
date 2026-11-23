@@ -196,6 +196,10 @@ pub fn merge(store: &mut Store, remote: Option<&SyncFile>, device: &str, now_wal
     let mut changed_local = false;
     if let Some(r) = remote {
         r.bump(store);
+        // Carimbo para os grupos que precisarem ser combinados (os dois lados mudaram): novo, à frente de tudo o
+        // que já se viu, para o resultado combinado vencer as duas versões em qualquer aparelho.
+        let fresh = now_wall.max(store.clock + 1);
+        let mut used_fresh = false;
 
         for rt in &r.tasks {
             // Exclusão local depois da última edição remota: continua excluída (a lápide vai no arquivo).
@@ -210,13 +214,31 @@ pub fn merge(store: &mut Store, remote: Option<&SyncFile>, device: &str, now_wal
             }
             match store.find_uid(&rt.uid) {
                 Some(i) => {
+                    let base = store.reference(&rt.uid).cloned();
                     let local = &mut store.tasks[i];
                     let incoming = rt.to_task(local.id);
                     for g in Group::ALL {
                         let (ls, rs) = (local.stamps.get(g), incoming.stamps.get(g));
+                        if local.group_eq(&incoming, g) {
+                            // O mesmo valor nos dois lados nunca é conflito; só o carimbo converge para o maior.
+                            if rs > ls {
+                                local.stamps.set(g, rs);
+                                changed_local = true;
+                            }
+                            continue;
+                        }
+                        // Os dois lados mudaram o mesmo grupo desde a última mesclagem que este aparelho conhece:
+                        // informações, checklist e tags são combinados em vez de escolher um lado.
+                        let both_changed = base.as_ref().is_some_and(|b| !b.group_eq(local, g) && !b.group_eq(&incoming, g));
+                        if both_changed && combine(local, &incoming, g) {
+                            local.stamps.set(g, fresh);
+                            used_fresh = true;
+                            changed_local = true;
+                            continue;
+                        }
                         let newer = rs > ls;
                         // Empate exato com conteúdo diferente: decide pelo texto, igual nos dois lados.
-                        let tie = rs == ls && !local.group_eq(&incoming, g) && incoming.group_key(g) > local.group_key(g);
+                        let tie = rs == ls && incoming.group_key(g) > local.group_key(g);
                         if newer || tie {
                             local.copy_group(&incoming, g);
                             changed_local = true;
@@ -260,6 +282,9 @@ pub fn merge(store: &mut Store, remote: Option<&SyncFile>, device: &str, now_wal
                 changed_local = true;
             }
         }
+        if used_fresh {
+            store.bump_clock(fresh);
+        }
     }
 
     // Lápides velhas saem, pelo relógio de parede: uma lápide "do futuro" (aparelho com a hora adiantada) fica.
@@ -273,23 +298,64 @@ pub fn merge(store: &mut Store, remote: Option<&SyncFile>, device: &str, now_wal
     MergeOutcome { changed_local, changed_file, file }
 }
 
+/// Separador entre o texto que venceu e o do outro aparelho, quando os dois editaram as informações.
+pub const OTHER_VERSION_MARK: &str = "--- versão de outro aparelho ---";
+
+/// Combina um grupo que os dois lados mudaram, sem perder nada de nenhum: tags em união, checklist em união por
+/// item (concluído se qualquer lado concluiu), informações com o texto vencedor (carimbo maior; empate pelo texto)
+/// e o perdedor no fim, depois de um separador. Os outros grupos não se combinam (devolve `false`).
+pub fn combine(local: &mut Task, incoming: &Task, g: Group) -> bool {
+    match g {
+        Group::Tags => {
+            for t in &incoming.tags {
+                if !local.tags.contains(t) {
+                    local.tags.push(t.clone());
+                }
+            }
+            true
+        }
+        Group::Subtasks => {
+            for s in &incoming.subtasks {
+                match local.subtasks.iter_mut().find(|l| l.title == s.title) {
+                    Some(l) => l.done |= s.done,
+                    None => local.subtasks.push(s.clone()),
+                }
+            }
+            true
+        }
+        Group::Notes => {
+            let (ls, rs) = (local.stamps.get(g), incoming.stamps.get(g));
+            let local_wins = ls > rs || (ls == rs && local.group_key(g) >= incoming.group_key(g));
+            let (winner, loser) = if local_wins { (&local.notes, &incoming.notes) } else { (&incoming.notes, &local.notes) };
+            // Um dos lados apagou o texto: fica o que sobrou, sem separador.
+            local.notes = match (winner.trim().is_empty(), loser.trim().is_empty()) {
+                (true, _) => loser.clone(),
+                (_, true) => winner.clone(),
+                _ => format!("{}\n\n{OTHER_VERSION_MARK}\n{}", winner.trim_end(), loser.trim()),
+            };
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Primeira mesclagem com um arquivo que já existe: uma tarefa daqui sem par no arquivo e uma do arquivo sem par
-/// aqui, com o mesmo título, data e hora, são a mesma tarefa que ganhou `uid`s diferentes (um computador migrado
-/// de uma versão sem sincronização, um backup antigo restaurado). A daqui assume a do arquivo, inteira: o arquivo
-/// é o lado que já estava sincronizado. Sem isto, tudo apareceria em dobro.
+/// aqui, **iguais em todos os grupos**, são a mesma tarefa que ganhou `uid`s diferentes (um computador migrado
+/// de uma versão sem sincronização, um backup antigo restaurado). A daqui assume o `uid` e os carimbos da do
+/// arquivo. Se algo difere (informações só daqui, checklist, tags...), as duas ficam: uma duplicata visível, que
+/// a pessoa apaga, em vez de perder conteúdo em silêncio.
 pub fn adopt_matches(store: &mut Store, remote: &SyncFile) -> bool {
     let remote_uids: HashSet<&str> = remote.tasks.iter().map(|t| t.uid.as_str()).collect();
-    let key = |title: &str, date: Option<NaiveDate>, time: Option<NaiveTime>| (title.trim().to_owned(), date, time);
     let mut changed = false;
     for rt in &remote.tasks {
         if store.find_uid(&rt.uid).is_some() {
             continue;
         }
-        let wanted = key(&rt.title, rt.date, rt.time);
-        let found = store.tasks.iter().position(|lt| !remote_uids.contains(lt.uid.as_str()) && key(&lt.title, lt.date, lt.time) == wanted);
+        let incoming = rt.to_task(0);
+        let found = store.tasks.iter().position(|lt| !remote_uids.contains(lt.uid.as_str()) && Group::ALL.iter().all(|g| lt.group_eq(&incoming, *g)));
         if let Some(i) = found {
-            let id = store.tasks[i].id;
-            store.tasks[i] = rt.to_task(id);
+            store.tasks[i].uid = rt.uid.clone();
+            store.tasks[i].stamps = rt.stamps;
             changed = true;
         }
     }
@@ -312,9 +378,9 @@ pub fn suggested_folder(cloud: &str, root: &Path) -> PathBuf {
 /// renomeação vira outro arquivo (outro id), e o celular, que guarda o id, ficaria preso ao antigo. A gravação
 /// é conferida lendo de volta; três tentativas. Um leitor que apanhe o arquivo no meio da gravação vê um JSON
 /// pela metade, e por isso toda leitura ilegível é repetida antes de valer (ver `BAD_READS`).
-pub fn write_same_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub fn write_same_file(path: &Path, bytes: &[u8]) -> Result<(), WriteFail> {
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("Não foi possível criar a pasta de sincronização: {e}"))?;
+        std::fs::create_dir_all(dir).map_err(|e| WriteFail::Io(format!("Não foi possível criar a pasta de sincronização: {e}")))?;
     }
     let mut last_err = String::new();
     for attempt in 0..3 {
@@ -330,12 +396,22 @@ pub fn write_same_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
             Err(e) => last_err = format!("Não foi possível gravar na pasta de sincronização: {e}"),
             Ok(()) => match std::fs::read(path) {
                 Ok(back) if back == bytes => return Ok(()),
-                Ok(_) => last_err = "A gravação na pasta de sincronização não conferiu ao ler de volta.".to_owned(),
+                // Outro conteúdo no lugar do nosso: o cliente da nuvem trouxe a versão de outro aparelho entre a
+                // gravação e a conferência. Não se grava por cima do que não foi lido: quem chamou relê e mescla.
+                Ok(_) => return Err(WriteFail::Changed),
                 Err(e) => last_err = format!("Não foi possível conferir a gravação: {e}"),
             },
         }
     }
-    Err(last_err)
+    Err(WriteFail::Io(last_err))
+}
+
+/// Por que uma gravação não valeu.
+#[derive(Debug, PartialEq)]
+pub enum WriteFail {
+    Io(String),
+    /// O arquivo já tinha outro conteúdo ao conferir: é preciso reler e mesclar.
+    Changed,
 }
 
 /// Guarda uma cópia de um arquivo ilegível, com a data no nome, e devolve o nome da cópia. Copia em vez de
@@ -508,7 +584,7 @@ fn parse(bytes: &[u8]) -> Result<SyncFile, serde_json::Error> {
 /// thread da interface, onde as tarefas estão.
 pub struct Sync {
     reading: Option<Receiver<Result<Read, String>>>,
-    writing: Option<Receiver<Result<(), String>>>,
+    writing: Option<Receiver<Result<(), WriteFail>>>,
     /// Instante, no relógio da interface, da próxima leitura.
     next_check: f64,
     /// Há mudanças locais gravadas que ainda não foram para o arquivo.
@@ -518,8 +594,6 @@ pub struct Sync {
     /// Leituras ilegíveis seguidas do mesmo conteúdo (download pela metade ou arquivo corrompido de vez).
     bad_reads: u8,
     bad_hash: Option<u64>,
-    /// A pessoa acabou de escolher a pasta: a primeira mesclagem casa tarefas iguais de `uid`s diferentes.
-    match_legacy: bool,
     last_ok: Option<NaiveDateTime>,
     error: Option<String>,
     /// Aviso que fica até a próxima leitura boa (arquivo ilegível posto de lado).
@@ -536,7 +610,6 @@ impl Sync {
             seen: None,
             bad_reads: 0,
             bad_hash: None,
-            match_legacy: false,
             last_ok: None,
             error: None,
             notice: None,
@@ -554,7 +627,6 @@ impl Sync {
         self.next_check = 0.0;
         self.seen = None;
         self.bad_reads = 0;
-        self.match_legacy = true;
         self.error = None;
         self.notice = None;
     }
@@ -599,7 +671,14 @@ impl Sync {
                     self.last_ok = Some(Local::now().naive_local());
                     self.error = None;
                 }
-                Ok(Err(e)) => {
+                Ok(Err(WriteFail::Changed)) => {
+                    // Outro aparelho gravou no meio: lê de novo já e mescla, em vez de gravar por cima.
+                    self.writing = None;
+                    self.pending = true;
+                    self.seen = None;
+                    self.next_check = time;
+                }
+                Ok(Err(WriteFail::Io(e))) => {
                     self.writing = None;
                     self.error = Some(e);
                     // A mudança local continua devendo ao arquivo.
@@ -698,13 +777,13 @@ impl Sync {
         if let Some(r) = &remote {
             r.bump(store);
         }
-        if store.dirty {
-            store.stamp_changes();
-        }
+        // Sempre, não só com `dirty`: é só uma comparação, e assim nenhuma mudança que tenha escapado da marca
+        // entra na referência sem carimbo.
+        store.stamp_changes();
         let now = Utc::now().timestamp_millis();
         let mut changed_local = false;
         if let Some(r) = &remote
-            && (self.match_legacy || !store.synced_once)
+            && !store.synced_once
         {
             changed_local |= adopt_matches(store, r);
         }
@@ -723,7 +802,6 @@ impl Sync {
             store.synced_once = true;
             changed_local = true;
         }
-        self.match_legacy = false;
         self.pending = false;
         if changed_local {
             store.dirty = true;
@@ -770,47 +848,52 @@ impl Sync {
             let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
         }
         self.reading = None;
+        store.stamp_changes();
         if store.dirty {
-            store.stamp_changes();
             self.pending = true;
         }
         if !self.pending {
             return;
         }
         let path = dir.join(FILE_NAME);
-        let Ok(read) = read_folder(dir) else { return };
-        let remote = read.bytes.as_deref().and_then(|b| parse(b).ok()).filter(|f| f.schema <= SCHEMA);
-        if read.bytes.is_some() && remote.is_none() {
-            // Ilegível ou de uma versão mais nova: não é hora de mexer nele.
-            return;
-        }
         let now = Utc::now().timestamp_millis();
         let mut changed_local = false;
-        if let Some(r) = &remote {
-            r.bump(store);
-            if self.match_legacy || !store.synced_once {
-                changed_local |= adopt_matches(store, r);
+        // Duas voltas no máximo: se outro aparelho gravar entre a nossa gravação e a conferência, relê e mescla.
+        for _ in 0..2 {
+            let Ok(read) = read_folder(dir) else { return };
+            let remote = read.bytes.as_deref().and_then(|b| parse(b).ok()).filter(|f| f.schema <= SCHEMA);
+            if read.bytes.is_some() && remote.is_none() {
+                // Ilegível ou de uma versão mais nova: não é hora de mexer nele.
+                break;
             }
-        }
-        changed_local |= merge(store, remote.as_ref(), device, now).changed_local;
-        for (copy_path, bytes) in &read.copies {
-            if let Ok(f) = parse(bytes)
-                && f.schema <= SCHEMA
-            {
-                changed_local |= merge(store, Some(&f), device, now).changed_local;
-                shelve(copy_path);
+            if let Some(r) = &remote {
+                r.bump(store);
+                if !store.synced_once {
+                    changed_local |= adopt_matches(store, r);
+                }
             }
-        }
-        if !store.synced_once {
-            store.synced_once = true;
-            changed_local = true;
-        }
-        store.mark_synced();
-        let file = SyncFile::from_store(store, device);
-        if remote.as_ref().is_none_or(|r| !r.same_content(&file))
-            && let Ok(json) = serde_json::to_vec_pretty(&file)
-        {
-            let _ = write_same_file(&path, &json);
+            changed_local |= merge(store, remote.as_ref(), device, now).changed_local;
+            for (copy_path, bytes) in &read.copies {
+                if let Ok(f) = parse(bytes)
+                    && f.schema <= SCHEMA
+                {
+                    changed_local |= merge(store, Some(&f), device, now).changed_local;
+                    shelve(copy_path);
+                }
+            }
+            if !store.synced_once {
+                store.synced_once = true;
+                changed_local = true;
+            }
+            store.mark_synced();
+            let file = SyncFile::from_store(store, device);
+            if remote.as_ref().is_some_and(|r| r.same_content(&file)) {
+                break;
+            }
+            let Ok(json) = serde_json::to_vec_pretty(&file) else { break };
+            if write_same_file(&path, &json) != Err(WriteFail::Changed) {
+                break;
+            }
         }
         if changed_local {
             // O que entrou na saída fica gravado aqui também, senão voltaria a ser mesclado na próxima abertura.
@@ -899,6 +982,12 @@ mod tests {
             let expected: SyncFile = serde_json::from_value(case["esperado"].clone()).unwrap();
             let now = case["agora"].as_i64().unwrap_or(default_now);
             let mut store = store_from(&local);
+            if let Some(base) = case.get("base") {
+                // O estado da última mesclagem que este aparelho conhece, para saber quem mudou o quê.
+                let base: SyncFile = serde_json::from_value(base.clone()).unwrap();
+                let tasks: Vec<Task> = base.tasks.iter().map(|t| t.to_task(0)).collect();
+                store.set_reference(&tasks);
+            }
             if case["primeira_vez"].as_bool() == Some(true)
                 && let Some(r) = &remote
             {
@@ -908,7 +997,103 @@ mod tests {
             assert!(out.file.same_content(&expected), "{name}: esperado {expected:?}, veio {:?}", out.file);
             n += 1;
         }
-        assert!(n >= 9, "{n} casos lidos");
+        assert!(n >= 15, "{n} casos lidos");
+    }
+
+    /// Um par (local, remoto) da mesma tarefa com a base da última mesclagem já na referência do `Store`.
+    fn three_way(base: &SyncTask, local: &SyncTask, remote: &SyncTask) -> (Store, SyncFile) {
+        let mut s = store_from(&file(vec![local.clone()], vec![]));
+        s.set_reference(&[base.to_task(1)]);
+        (s, file(vec![remote.clone()], vec![]))
+    }
+
+    #[test]
+    fn os_dois_lados_mudaram_tags_e_checklist_viram_uniao() {
+        let mut base = task("a", "Reunião", 100);
+        base.tags = vec!["trabalho".into()];
+        base.subtasks = vec![Subtask { title: "Pauta".into(), done: false }, Subtask { title: "Sala".into(), done: false }];
+        let mut local = base.clone();
+        local.tags.push("urgente".into());
+        local.subtasks[0].done = true; // marcou a pauta
+        local.stamps.set(Group::Tags, 300);
+        local.stamps.set(Group::Subtasks, 300);
+        let mut remote = base.clone();
+        remote.tags.push("cliente".into());
+        remote.subtasks.push(Subtask { title: "Café".into(), done: true }); // acrescentou um item
+        remote.stamps.set(Group::Tags, 400);
+        remote.stamps.set(Group::Subtasks, 400);
+        let (mut s, r) = three_way(&base, &local, &remote);
+        let out = merge(&mut s, Some(&r), "t", NOW);
+        let t = &out.file.tasks[0];
+        assert_eq!(t.tags, ["trabalho", "urgente", "cliente"]);
+        let items: Vec<(&str, bool)> = t.subtasks.iter().map(|x| (x.title.as_str(), x.done)).collect();
+        assert_eq!(items, [("Pauta", true), ("Sala", false), ("Café", true)]);
+        assert_eq!(t.stamps.tags, NOW, "o combinado ganha carimbo novo, à frente dos dois");
+        assert_eq!(t.stamps.subtasks, NOW);
+        assert_eq!(t.stamps.title, 100, "os grupos que ninguém mexeu ficam como estavam");
+        // O outro aparelho recebe o combinado por carimbo maior, e os dois convergem.
+        let mut other = store_from(&r);
+        merge(&mut other, Some(&out.file), "o", NOW);
+        assert!(SyncFile::from_store(&other, "o").same_content(&out.file));
+    }
+
+    #[test]
+    fn informacoes_editadas_dos_dois_lados_guardam_as_duas_versoes() {
+        let mut base = task("a", "Consulta", 100);
+        base.notes = "Levar documentos".into();
+        let mut local = base.clone();
+        local.notes = "Levar documentos e exames".into();
+        local.stamps.set(Group::Notes, 300);
+        let mut remote = base.clone();
+        remote.notes = "Levar RG".into();
+        remote.stamps.set(Group::Notes, 400);
+        let (mut s, r) = three_way(&base, &local, &remote);
+        let out = merge(&mut s, Some(&r), "t", NOW);
+        assert_eq!(out.file.tasks[0].notes, format!("Levar RG\n\n{OTHER_VERSION_MARK}\nLevar documentos e exames"), "a mais nova em cima, a outra embaixo");
+        assert_eq!(out.file.tasks[0].stamps.notes, NOW);
+        // Só um lado mudou: continua valendo o carimbo, sem anexo.
+        let (mut s, r) = three_way(&base, &base, &remote);
+        let out = merge(&mut s, Some(&r), "t", NOW);
+        assert_eq!(out.file.tasks[0].notes, "Levar RG");
+        assert_eq!(out.file.tasks[0].stamps.notes, 400);
+        // O outro lado apagou as informações: a versão que sobrou fica, sem separador.
+        let mut cleared = base.clone();
+        cleared.notes = String::new();
+        cleared.stamps.set(Group::Notes, 400);
+        let (mut s, r) = three_way(&base, &local, &cleared);
+        let out = merge(&mut s, Some(&r), "t", NOW);
+        assert_eq!(out.file.tasks[0].notes, "Levar documentos e exames");
+    }
+
+    #[test]
+    fn mesmo_valor_nos_dois_lados_nunca_e_conflito() {
+        let mut base = task("a", "Consulta", 100);
+        base.notes = "a".into();
+        let mut local = base.clone();
+        local.notes = "b".into();
+        local.stamps.set(Group::Notes, 300);
+        let mut remote = local.clone();
+        remote.stamps.set(Group::Notes, 400);
+        let (mut s, r) = three_way(&base, &local, &remote);
+        let out = merge(&mut s, Some(&r), "t", NOW);
+        assert_eq!(out.file.tasks[0].notes, "b");
+        assert_eq!(out.file.tasks[0].stamps.notes, 400, "só o carimbo converge para o maior");
+        assert!(!out.changed_file, "o arquivo já tinha exatamente isto");
+    }
+
+    #[test]
+    fn titulo_e_estado_nao_se_combinam_e_seguem_o_carimbo() {
+        let base = task("a", "Pão", 100);
+        let mut local = base.clone();
+        local.title = "Pão integral".into();
+        local.stamps.set(Group::Title, 300);
+        let mut remote = base.clone();
+        remote.title = "Pão francês".into();
+        remote.stamps.set(Group::Title, 400);
+        let (mut s, r) = three_way(&base, &local, &remote);
+        let out = merge(&mut s, Some(&r), "t", NOW);
+        assert_eq!(out.file.tasks[0].title, "Pão francês");
+        assert_eq!(out.file.tasks[0].stamps.title, 400);
     }
 
     #[test]
@@ -1016,16 +1201,24 @@ mod tests {
         local.add("Só daqui".into(), None);
         local.save();
         assert!(!local.synced_once);
-        let mut r1 = task("r-1", "Aluguel", 1_764_000_000_100);
-        r1.date = date;
-        r1.notes = "pagar pelo app".into();
-        let remote = file(vec![r1, task("r-2", "Dentista", 1_764_000_000_100)], vec![]);
+        // No arquivo, a mesma "Aluguel" (igual em todos os grupos) com outro uid, e uma "Só daqui" que difere
+        // (lá ela tem anotações): essa não casa, e as duas ficam.
+        let mut r1 = SyncTask::from_task(&local.tasks[0]);
+        r1.uid = "r-1".into();
+        for g in Group::ALL {
+            r1.stamps.set(g, 1_764_000_000_100);
+        }
+        let mut r3 = SyncTask::from_task(&local.tasks[1]);
+        r3.uid = "r-3".into();
+        r3.notes = "anotação só do arquivo".into();
+        let remote = file(vec![r1, task("r-2", "Dentista", 1_764_000_000_100), r3], vec![]);
         assert!(adopt_matches(&mut local, &remote));
         let out = merge(&mut local, Some(&remote), "t", NOW);
-        assert_eq!(local.tasks.len(), 3, "Aluguel não dobrou");
+        assert_eq!(local.tasks.len(), 4, "Aluguel não dobrou; Só daqui dobrou de propósito, porque difere");
         let aluguel = &local.tasks[local.tasks.iter().position(|t| t.id == id).unwrap()];
-        assert_eq!((aluguel.uid.as_str(), aluguel.notes.as_str()), ("r-1", "pagar pelo app"), "assume a do arquivo, com o id local");
-        assert_eq!(out.file.tasks.len(), 3);
+        assert_eq!((aluguel.uid.as_str(), aluguel.stamps.title), ("r-1", 1_764_000_000_100), "assume uid e carimbos do arquivo, com o id local");
+        assert_eq!(local.tasks.iter().filter(|t| t.title == "Só daqui").count(), 2);
+        assert_eq!(out.file.tasks.len(), 4);
         // Depois da primeira vez, duas tarefas iguais criadas de lados diferentes são mesmo duas.
         let mut again = store_from(&out.file);
         again.add("Dentista".into(), None);
@@ -1045,8 +1238,8 @@ mod tests {
         let mut other = task("a", "Do celular", stamp + 5_000);
         other.notes = "nota do celular".into();
         std::fs::write(dir.join(FILE_NAME), json(&file(vec![other], vec![]))).unwrap();
+        // Sem marcar `dirty` de propósito: a mudança precisa ser carimbada mesmo assim antes de mesclar.
         store.tasks[0].title = "Digitado agora".into();
-        store.dirty = true;
         let mut sync = Sync::new();
         sync.kick();
         let mut time = 0.0;

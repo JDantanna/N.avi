@@ -416,7 +416,12 @@ pub struct Store {
 impl Store {
     /// Um carimbo novo: o relógio de agora, ou um passo à frente do maior carimbo já visto, o que for maior.
     pub fn now_stamp(&mut self) -> i64 {
-        let wall = Utc::now().timestamp_millis();
+        self.stamp_at(Utc::now().timestamp_millis())
+    }
+
+    /// O mesmo que `now_stamp`, com o relógio de parede dado (a mesclagem usa o dela, para os casos
+    /// compartilhados saírem iguais em qualquer máquina).
+    pub fn stamp_at(&mut self, wall: i64) -> i64 {
         self.clock = wall.max(self.clock + 1);
         self.clock
     }
@@ -469,7 +474,18 @@ impl Store {
     /// O estado de agora passa a ser a referência para a próxima gravação (depois de mesclar com outro aparelho,
     /// para o que veio de lá não ser carimbado de novo como mudança daqui).
     pub fn mark_synced(&mut self) {
-        self.last = self.tasks.iter().map(|t| (t.uid.clone(), t.clone())).collect();
+        self.set_reference(&self.tasks.clone());
+    }
+
+    /// Uma referência dada (nos testes: o estado da última sincronização que o caso descreve).
+    pub fn set_reference(&mut self, tasks: &[Task]) {
+        self.last = tasks.iter().map(|t| (t.uid.clone(), t.clone())).collect();
+    }
+
+    /// A tarefa `uid` como estava na última gravação ou mesclagem: a base para saber se os dois lados mudaram
+    /// o mesmo grupo desde então.
+    pub fn reference(&self, uid: &str) -> Option<&Task> {
+        self.last.get(uid)
     }
 
     /// Entra uma tarefa vinda de outro aparelho, com um id local novo.

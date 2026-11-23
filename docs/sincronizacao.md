@@ -114,18 +114,30 @@ mesmos dados chegam ao mesmo resultado, em qualquer ordem.
    computador lê todo `N.avi.sync*.json` da pasta (menos os `.corrompido-`), mescla cada cópia como se fosse
    outro arquivo remoto e depois a move para a subpasta `conflitos/`, sem apagar nada.
 8. **Primeira mesclagem com um arquivo que já existe** (computador migrado de uma versão sem sincronização,
-   pasta escolhida agora, backup antigo restaurado): uma tarefa daqui sem par no arquivo e uma do arquivo sem par
-   aqui, com o mesmo título, data e hora, são a mesma tarefa que ganhou `uid`s diferentes. A daqui assume a do
-   arquivo (uid, conteúdo e carimbos), mantendo só o `id` local; sem isso tudo apareceria em dobro. Depois dessa
-   primeira vez (`synced_once`), duas tarefas iguais criadas em lados diferentes são mesmo duas.
+   backup antigo restaurado): uma tarefa daqui sem par no arquivo e uma do arquivo sem par aqui, **iguais em
+   todos os grupos**, são a mesma tarefa que ganhou `uid`s diferentes. A daqui assume o `uid` e os carimbos da do
+   arquivo, mantendo o `id` local; sem isso tudo apareceria em dobro. Se algo difere (informações só de um lado,
+   checklist, tags...), as duas ficam: uma duplicata visível, que a pessoa apaga, em vez de perder conteúdo em
+   silêncio. Isso acontece uma vez só por aparelho (`synced_once`), na primeira entrada de verdade, não a cada
+   vez que a pasta é escolhida; depois, duas tarefas iguais criadas em lados diferentes são mesmo duas.
 
-### Grupos como unidade: o que se perde de propósito nesta fase
+### Os dois lados mudaram o mesmo grupo: combinar, não escolher
 
-Informações, checklist e lista de tags são comparados **inteiros**. Se os dois aparelhos editarem as informações
-da mesma tarefa antes de sincronizar, uma das versões do texto se perde; o mesmo vale para um item marcado no
-celular e outro acrescentado no computador no mesmo checklist. É uma perda aceita nesta fase, documentada aqui;
-a solução (guardar a versão perdedora das informações no fim do texto, carimbo por item do checklist com `uid`
-por subtarefa) fica para quando o uso mostrar que acontece.
+A regra 1 (vence o carimbo maior) só vale quando um lado mudou. Cada aparelho guarda a tarefa como estava na
+**última mesclagem que ele conhece** (a referência de `mark_synced`, a mesma que decide o que carimbar). Se, em
+relação a essa base, **os dois lados mudaram o mesmo grupo** e os valores diferem, o grupo é combinado, para
+nada se perder:
+
+- **tags**: união (as daqui na ordem daqui, depois as de lá que faltavam);
+- **checklist**: união por item (pelo título), e o item fica concluído se **qualquer** lado o concluiu. Um item
+  apagado num lado pode voltar; aceitável, porque não perde nada;
+- **informações**: fica o texto que venceria pela regra 1 e, embaixo de uma linha
+  `--- versão de outro aparelho ---`, o texto do outro lado (só se ele não estiver vazio).
+
+O grupo combinado recebe um **carimbo novo**, `max(agora, clock + 1)`, à frente de tudo o que o aparelho já viu:
+assim o resultado combinado vence as duas versões em qualquer outro aparelho pela regra 1, e os dois convergem.
+O mesmo valor nos dois lados nunca é conflito (só o carimbo converge para o maior). Título, data/estado, aviso e
+cor não se combinam: seguem o carimbo. Sem base (tarefa que este aparelho nunca sincronizou), vale a regra 1.
 
 ### Arquivo ilegível
 
@@ -144,7 +156,9 @@ enquanto o conteúdo não mudar. Só então:
 - **Computador**: numa pasta que a pessoa escolhe na janela de Backup, de preferência sincronizada por Google
   Drive (`Meu Drive\N.avi`) ou OneDrive (`OneDrive\Apps\N.avi`). O app lê a pasta a cada 20 s e logo depois
   de gravar as tarefas, em segundo plano (a unidade da nuvem pode demorar). A gravação **regrava o conteúdo do
-  próprio arquivo** (abrir, truncar, escrever, `fsync`) e confere lendo de volta, com três tentativas; nunca
+  próprio arquivo** (abrir, truncar, escrever, `fsync`) e confere lendo de volta, com três tentativas. Se a
+  leitura de volta encontrar **outro conteúdo** (o cliente da nuvem trouxe a versão de outro aparelho entre a
+  gravação e a conferência), o app não regrava por cima: relê, mescla e só então grava. Nunca
   troca o arquivo por outro via renomeação, porque o Google Drive trata a troca como "apagar e criar" e o
   arquivo novo ganha outro id, invisível para o celular (ver abaixo). O leitor que apanhar o arquivo no meio de
   uma gravação vê um JSON pela metade, que a releitura descrita acima absorve.
@@ -194,7 +208,8 @@ portada para `web/js/recorrencia.js`, e a mesclagem seguirá o mesmo caminho. Pa
   e quando uma tarefa está atrasada (sem `time` só no dia seguinte, com `time` quando a hora passa).
   Rodado por `web/tests/logica.test.mjs` e por `model.rs` (`recorrencia_segue_os_vetores_compartilhados_com_o_web`).
 - `docs/sync-casos/mesclagem.json`: estado local, estado remoto e o resultado esperado da mesclagem, com o
-  relógio de parede (`agora`) de cada caso e a marca `primeira_vez` para os casos da regra 8. Rodado por
+  relógio de parede (`agora`) de cada caso, a `base` (o estado da última mesclagem, para os casos em que os dois
+  lados mudaram o mesmo grupo) e a marca `primeira_vez` para os casos da regra 8. Rodado por
   `src/sync.rs` hoje e pelo web quando a mesclagem chegar lá.
 
 Um caso novo entra primeiro no JSON e só então nas duas implementações. Se um dia a lógica crescer, o WASM continua

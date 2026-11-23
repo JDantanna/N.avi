@@ -1,5 +1,5 @@
 {
-  "descricao": "Casos de mesclagem compartilhados entre o N.avi do computador (Rust) e o do celular. Cada caso parte de 'local' (o que o aparelho tem), recebe 'remoto' (o arquivo lido; null = arquivo inexistente) e precisa terminar em 'esperado'. Os carimbos sao ms Unix; a ordem das tarefas nao importa. 'agora' e o relogio de parede em ms usado para podar lapides com mais de 90 dias (o de cima vale para todos os casos; um caso pode ter o seu). 'primeira_vez': true roda antes o casamento de tarefas iguais (titulo, data, hora) com uids diferentes, que so acontece na primeira mesclagem com um arquivo existente.",
+  "descricao": "Casos de mesclagem compartilhados entre o N.avi do computador (Rust) e o do celular. Cada caso parte de 'local' (o que o aparelho tem), recebe 'remoto' (o arquivo lido; null = arquivo inexistente) e precisa terminar em 'esperado'. Os carimbos sao ms Unix; a ordem das tarefas nao importa. 'agora' e o relogio de parede em ms usado para podar lapides com mais de 90 dias (o de cima vale para todos os casos; um caso pode ter o seu). 'base' e o estado da ultima mesclagem que o aparelho conhece (a referencia de mark_synced): quando local e remoto mudaram o mesmo grupo em relacao a ele, informacoes, checklist e tags sao combinados em vez de escolher um lado, com carimbo novo = max(agora, clock + 1). 'primeira_vez': true roda antes o casamento de tarefas iguais em todos os grupos com uids diferentes, que so acontece na primeira mesclagem com um arquivo existente.",
   "agora": 1764001000000,
   "casos": [
     {
@@ -52,11 +52,53 @@
       "esperado": { "tasks": [], "deleted": [ { "uid": "recente", "at": 1764000000000 }, { "uid": "futura", "at": 1764865000000 } ], "tags": {} }
     },
     {
-      "nome": "primeira sincronizacao: a mesma tarefa com uids diferentes vira uma so, com o uid e o conteudo do arquivo",
+      "nome": "primeira sincronizacao: tarefa igual em tudo, com uid diferente, vira uma so, com o uid e os carimbos do arquivo",
       "primeira_vez": true,
       "local": { "tasks": [ { "uid": "local-1", "title": "Aluguel", "date": "2026-12-05", "stamps": { "title": 1764000000500, "state": 1764000000500 } }, { "uid": "local-2", "title": "So daqui", "stamps": { "title": 1764000000500 } } ], "deleted": [], "tags": {} },
-      "remoto": { "tasks": [ { "uid": "r-1", "title": "Aluguel", "date": "2026-12-05", "notes": "pagar pelo app", "stamps": { "title": 1764000000100, "notes": 1764000000100, "state": 1764000000100 } } ], "deleted": [], "tags": {} },
-      "esperado": { "tasks": [ { "uid": "r-1", "title": "Aluguel", "date": "2026-12-05", "notes": "pagar pelo app", "stamps": { "title": 1764000000100, "notes": 1764000000100, "state": 1764000000100 } }, { "uid": "local-2", "title": "So daqui", "stamps": { "title": 1764000000500 } } ], "deleted": [], "tags": {} }
+      "remoto": { "tasks": [ { "uid": "r-1", "title": "Aluguel", "date": "2026-12-05", "stamps": { "title": 1764000000100, "state": 1764000000100 } } ], "deleted": [], "tags": {} },
+      "esperado": { "tasks": [ { "uid": "r-1", "title": "Aluguel", "date": "2026-12-05", "stamps": { "title": 1764000000100, "state": 1764000000100 } }, { "uid": "local-2", "title": "So daqui", "stamps": { "title": 1764000000500 } } ], "deleted": [], "tags": {} }
+    },
+    {
+      "nome": "primeira sincronizacao: tarefa parecida mas com informacoes so de um lado nao casa; ficam as duas",
+      "primeira_vez": true,
+      "local": { "tasks": [ { "uid": "local-1", "title": "Dentista", "date": "2026-12-05", "time": "14:00:00", "notes": "levar o raio-x", "stamps": { "title": 1764000000500, "notes": 1764000000500, "state": 1764000000500 } } ], "deleted": [], "tags": {} },
+      "remoto": { "tasks": [ { "uid": "r-1", "title": "Dentista", "date": "2026-12-05", "time": "14:00:00", "stamps": { "title": 1764000000100, "state": 1764000000100 } } ], "deleted": [], "tags": {} },
+      "esperado": { "tasks": [ { "uid": "local-1", "title": "Dentista", "date": "2026-12-05", "time": "14:00:00", "notes": "levar o raio-x", "stamps": { "title": 1764000000500, "notes": 1764000000500, "state": 1764000000500 } }, { "uid": "r-1", "title": "Dentista", "date": "2026-12-05", "time": "14:00:00", "stamps": { "title": 1764000000100, "state": 1764000000100 } } ], "deleted": [], "tags": {} }
+    },
+    {
+      "nome": "tags mudadas dos dois lados desde a base: uniao, com carimbo novo",
+      "base": { "tasks": [ { "uid": "a", "title": "Reuniao", "tags": ["trabalho"], "stamps": { "title": 1764000000100, "tags": 1764000000100 } } ] },
+      "local": { "tasks": [ { "uid": "a", "title": "Reuniao", "tags": ["trabalho", "urgente"], "stamps": { "title": 1764000000100, "tags": 1764000000300 } } ], "deleted": [], "tags": {} },
+      "remoto": { "tasks": [ { "uid": "a", "title": "Reuniao", "tags": ["trabalho", "cliente"], "stamps": { "title": 1764000000100, "tags": 1764000000400 } } ], "deleted": [], "tags": {} },
+      "esperado": { "tasks": [ { "uid": "a", "title": "Reuniao", "tags": ["trabalho", "urgente", "cliente"], "stamps": { "title": 1764000000100, "tags": 1764001000000 } } ], "deleted": [], "tags": {} }
+    },
+    {
+      "nome": "checklist mudado dos dois lados: uniao por item, concluido se qualquer lado concluiu",
+      "base": { "tasks": [ { "uid": "a", "title": "Reuniao", "subtasks": [ { "title": "Pauta", "done": false } ], "stamps": { "title": 1764000000100, "subtasks": 1764000000100 } } ] },
+      "local": { "tasks": [ { "uid": "a", "title": "Reuniao", "subtasks": [ { "title": "Pauta", "done": true } ], "stamps": { "title": 1764000000100, "subtasks": 1764000000300 } } ], "deleted": [], "tags": {} },
+      "remoto": { "tasks": [ { "uid": "a", "title": "Reuniao", "subtasks": [ { "title": "Pauta", "done": false }, { "title": "Sala", "done": false } ], "stamps": { "title": 1764000000100, "subtasks": 1764000000400 } } ], "deleted": [], "tags": {} },
+      "esperado": { "tasks": [ { "uid": "a", "title": "Reuniao", "subtasks": [ { "title": "Pauta", "done": true }, { "title": "Sala", "done": false } ], "stamps": { "title": 1764000000100, "subtasks": 1764001000000 } } ], "deleted": [], "tags": {} }
+    },
+    {
+      "nome": "informacoes mudadas dos dois lados: a de carimbo maior em cima, a outra embaixo do separador",
+      "base": { "tasks": [ { "uid": "a", "title": "Consulta", "notes": "Levar documentos", "stamps": { "title": 1764000000100, "notes": 1764000000100 } } ] },
+      "local": { "tasks": [ { "uid": "a", "title": "Consulta", "notes": "Levar documentos e exames", "stamps": { "title": 1764000000100, "notes": 1764000000300 } } ], "deleted": [], "tags": {} },
+      "remoto": { "tasks": [ { "uid": "a", "title": "Consulta", "notes": "Levar RG", "stamps": { "title": 1764000000100, "notes": 1764000000400 } } ], "deleted": [], "tags": {} },
+      "esperado": { "tasks": [ { "uid": "a", "title": "Consulta", "notes": "Levar RG\n\n--- versão de outro aparelho ---\nLevar documentos e exames", "stamps": { "title": 1764000000100, "notes": 1764001000000 } } ], "deleted": [], "tags": {} }
+    },
+    {
+      "nome": "o mesmo valor nos dois lados nunca e conflito: so o carimbo converge para o maior",
+      "base": { "tasks": [ { "uid": "a", "title": "Consulta", "notes": "a", "stamps": { "title": 1764000000100, "notes": 1764000000100 } } ] },
+      "local": { "tasks": [ { "uid": "a", "title": "Consulta", "notes": "b", "stamps": { "title": 1764000000100, "notes": 1764000000300 } } ], "deleted": [], "tags": {} },
+      "remoto": { "tasks": [ { "uid": "a", "title": "Consulta", "notes": "b", "stamps": { "title": 1764000000100, "notes": 1764000000400 } } ], "deleted": [], "tags": {} },
+      "esperado": { "tasks": [ { "uid": "a", "title": "Consulta", "notes": "b", "stamps": { "title": 1764000000100, "notes": 1764000000400 } } ], "deleted": [], "tags": {} }
+    },
+    {
+      "nome": "titulo mudado dos dois lados nao se combina: vence o carimbo maior",
+      "base": { "tasks": [ { "uid": "a", "title": "Pao", "stamps": { "title": 1764000000100 } } ] },
+      "local": { "tasks": [ { "uid": "a", "title": "Pao integral", "stamps": { "title": 1764000000300 } } ], "deleted": [], "tags": {} },
+      "remoto": { "tasks": [ { "uid": "a", "title": "Pao frances", "stamps": { "title": 1764000000400 } } ], "deleted": [], "tags": {} },
+      "esperado": { "tasks": [ { "uid": "a", "title": "Pao frances", "stamps": { "title": 1764000000400 } } ], "deleted": [], "tags": {} }
     }
   ]
 }
