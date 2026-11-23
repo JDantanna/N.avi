@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
-use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Pasta de dados do app (`%APPDATA%\Navi`). Migra a antiga `Des_Atento` na primeira execução.
@@ -19,13 +19,13 @@ pub fn data_dir() -> PathBuf {
     new
 }
 
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Eq, Debug)]
 pub struct Subtask {
     pub title: String,
     pub done: bool,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum Repeat {
     #[default]
     None,
@@ -75,9 +75,103 @@ fn add_months(d: NaiveDate, months: i32, anchor: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(y, m, anchor.min(days_in_month(y, m))).unwrap_or(d)
 }
 
+/// Quando cada grupo de campos de uma tarefa mudou pela última vez, no relógio de sincronização (ms Unix, de um
+/// relógio híbrido que nunca anda para trás: ver `Store::now_stamp`). Cada grupo é mesclado por conta própria
+/// entre aparelhos: concluir no celular e mudar o título no computador ao mesmo tempo não perde nenhum dos dois.
+#[derive(Serialize, Deserialize, Clone, Copy, Default, PartialEq, Eq, Debug)]
+#[serde(default)]
+pub struct Stamps {
+    pub title: i64,
+    pub notes: i64,
+    /// Data, hora, concluída e repetição: mudam juntas ao concluir uma recorrente.
+    pub state: i64,
+    pub notify: i64,
+    pub tags: i64,
+    pub color: i64,
+    pub subtasks: i64,
+}
+
+/// Os grupos de campos de uma tarefa que a sincronização mescla separadamente.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Group {
+    Title,
+    Notes,
+    State,
+    Notify,
+    Tags,
+    Color,
+    Subtasks,
+}
+
+impl Group {
+    pub const ALL: [Group; 7] = [Group::Title, Group::Notes, Group::State, Group::Notify, Group::Tags, Group::Color, Group::Subtasks];
+}
+
+impl Stamps {
+    pub fn get(&self, g: Group) -> i64 {
+        match g {
+            Group::Title => self.title,
+            Group::Notes => self.notes,
+            Group::State => self.state,
+            Group::Notify => self.notify,
+            Group::Tags => self.tags,
+            Group::Color => self.color,
+            Group::Subtasks => self.subtasks,
+        }
+    }
+
+    pub fn set(&mut self, g: Group, at: i64) {
+        match g {
+            Group::Title => self.title = at,
+            Group::Notes => self.notes = at,
+            Group::State => self.state = at,
+            Group::Notify => self.notify = at,
+            Group::Tags => self.tags = at,
+            Group::Color => self.color = at,
+            Group::Subtasks => self.subtasks = at,
+        }
+    }
+
+    /// O carimbo mais recente da tarefa (a última vez que algo nela mudou).
+    pub fn latest(&self) -> i64 {
+        Group::ALL.iter().map(|g| self.get(*g)).max().unwrap_or(0)
+    }
+}
+
+/// Tarefa excluída, lembrada para a exclusão chegar aos outros aparelhos.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct Tombstone {
+    pub uid: String,
+    /// Carimbo da exclusão.
+    pub at: i64,
+}
+
+/// Identidade nova, única entre aparelhos: 128 bits misturados do relógio, do processo, de um contador e do
+/// endereço de uma variável (que muda a cada execução). Sem dependência de gerador aleatório.
+pub fn fresh_uid() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    fn mix(mut z: u64) -> u64 {
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id() as u64;
+    let addr = &n as *const u64 as u64;
+    format!("{:016x}{:016x}", mix(t ^ pid.rotate_left(32) ^ n.wrapping_mul(0x9e37_79b9_7f4a_7c15)), mix(t.rotate_left(17) ^ addr ^ n))
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Task {
     pub id: u64,
+    /// Identidade entre aparelhos (o `id` vale só nesta máquina). Vazio só em arquivos de versões antigas.
+    #[serde(default)]
+    pub uid: String,
+    /// Quando cada grupo de campos mudou pela última vez.
+    #[serde(default)]
+    pub stamps: Stamps,
     pub title: String,
     pub notes: String,
     pub done: bool,
@@ -136,10 +230,14 @@ impl Task {
     /// Em repetição finita, a última ocorrência concluída fica concluída de vez.
     /// Retorna `true` se a tarefa foi reagendada.
     pub fn roll_over(&mut self) -> bool {
+        self.roll_over_on(Local::now().date_naive())
+    }
+
+    /// [`Self::roll_over`] com o dia de hoje dado (para os testes e para o celular reproduzirem o mesmo).
+    pub fn roll_over_on(&mut self, today: NaiveDate) -> bool {
         if self.repeat == Repeat::None || !self.done {
             return false;
         }
-        let today = Local::now().date_naive();
         // Ocorrências que ainda restam depois desta (as puladas por atraso também contam).
         let mut left = self.repeat_times.map(|n| n as i64 - 1);
         let mut next = self.next_after(self.date.unwrap_or(today));
@@ -204,6 +302,74 @@ impl Task {
     pub fn subtasks_done(&self) -> (usize, usize) {
         (self.subtasks.iter().filter(|s| s.done).count(), self.subtasks.len())
     }
+
+    /// Os campos do grupo `g` são iguais nas duas tarefas?
+    pub fn group_eq(&self, other: &Task, g: Group) -> bool {
+        match g {
+            Group::Title => self.title == other.title,
+            Group::Notes => self.notes == other.notes,
+            Group::State => {
+                self.done == other.done
+                    && self.date == other.date
+                    && self.time == other.time
+                    && self.repeat == other.repeat
+                    && self.every == other.every
+                    && self.anchor_day == other.anchor_day
+                    && self.repeat_times == other.repeat_times
+            }
+            Group::Notify => self.notify == other.notify && self.notify_day_before == other.notify_day_before,
+            Group::Tags => self.tags == other.tags,
+            Group::Color => self.color == other.color,
+            Group::Subtasks => self.subtasks == other.subtasks,
+        }
+    }
+
+    /// Copia os campos do grupo `g`, e o carimbo dele, de `from`.
+    pub fn copy_group(&mut self, from: &Task, g: Group) {
+        match g {
+            Group::Title => self.title = from.title.clone(),
+            Group::Notes => self.notes = from.notes.clone(),
+            Group::State => {
+                self.done = from.done;
+                self.date = from.date;
+                self.time = from.time;
+                self.repeat = from.repeat;
+                self.every = from.every;
+                self.anchor_day = from.anchor_day;
+                self.repeat_times = from.repeat_times;
+            }
+            Group::Notify => {
+                self.notify = from.notify;
+                self.notify_day_before = from.notify_day_before;
+            }
+            Group::Tags => self.tags = from.tags.clone(),
+            Group::Color => self.color = from.color,
+            Group::Subtasks => self.subtasks = from.subtasks.clone(),
+        }
+        self.stamps.set(g, from.stamps.get(g));
+    }
+
+    /// Texto canônico do grupo `g`, para desempatar carimbos iguais do mesmo jeito em qualquer aparelho.
+    pub fn group_key(&self, g: Group) -> String {
+        match g {
+            Group::Title => format!("{:?}", self.title),
+            Group::Notes => format!("{:?}", self.notes),
+            Group::State => format!(
+                "{}|{}|{}|{:?}|{}|{}|{}",
+                self.done,
+                self.date.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default(),
+                self.time.map(|t| t.format("%H:%M:%S").to_string()).unwrap_or_default(),
+                self.repeat,
+                self.every,
+                self.anchor_day,
+                self.repeat_times.map(|n| n.to_string()).unwrap_or_default()
+            ),
+            Group::Notify => format!("{}|{}", self.notify.map(|n| n.to_string()).unwrap_or_default(), self.notify_day_before),
+            Group::Tags => format!("{:?}", self.tags),
+            Group::Color => format!("{:?}", self.color),
+            Group::Subtasks => format!("{:?}", self.subtasks),
+        }
+    }
 }
 
 pub type TagColors = BTreeMap<String, [u8; 3]>;
@@ -225,15 +391,126 @@ pub struct Store {
     pub tasks: Vec<Task>,
     #[serde(default)]
     pub tag_colors: TagColors,
+    /// Quando a cor de cada tag mudou pela última vez; uma tag com carimbo e sem cor teve a cor removida.
+    #[serde(default)]
+    pub tag_stamps: BTreeMap<String, i64>,
+    /// Tarefas excluídas, para a exclusão chegar aos outros aparelhos.
+    #[serde(default)]
+    pub deleted: Vec<Tombstone>,
+    /// Relógio de sincronização: o maior carimbo já dado ou visto. Nunca anda para trás, nem com o relógio do
+    /// computador errado (ver `now_stamp`).
+    #[serde(default)]
+    pub clock: i64,
     #[serde(skip)]
     pub dirty: bool,
+    /// As tarefas como estavam na última gravação ou sincronização, por `uid`: é comparando com isto que a
+    /// gravação descobre o que mudou e carimba só os grupos certos.
+    #[serde(skip)]
+    last: HashMap<String, Task>,
 }
 
 impl Store {
+    /// Um carimbo novo: o relógio de agora, ou um passo à frente do maior carimbo já visto, o que for maior.
+    pub fn now_stamp(&mut self) -> i64 {
+        let wall = Utc::now().timestamp_millis();
+        self.clock = wall.max(self.clock + 1);
+        self.clock
+    }
+
+    /// Um carimbo lido de outro aparelho: o relógio daqui nunca fica atrás dele.
+    pub fn bump_clock(&mut self, seen: i64) {
+        self.clock = self.clock.max(seen);
+    }
+
+    /// Carimba os grupos que mudaram desde a última gravação, cria lápides para as tarefas que sumiram e tira as
+    /// lápides das que voltaram (desfazer). Roda a cada gravação, antes de escrever o arquivo.
+    fn stamp_changes(&mut self) {
+        let changed = self
+            .tasks
+            .iter()
+            .any(|t| self.last.get(&t.uid).is_none_or(|p| Group::ALL.iter().any(|g| !p.group_eq(t, *g))))
+            || self.last.keys().any(|uid| !self.tasks.iter().any(|t| &t.uid == uid));
+        if !changed {
+            return;
+        }
+        let now = self.now_stamp();
+        let Store { tasks, last, deleted, .. } = self;
+        for t in tasks.iter_mut() {
+            match last.get(&t.uid) {
+                None => {
+                    for g in Group::ALL {
+                        t.stamps.set(g, now);
+                    }
+                }
+                Some(prev) => {
+                    for g in Group::ALL {
+                        if !prev.group_eq(t, g) {
+                            t.stamps.set(g, now);
+                        }
+                    }
+                }
+            }
+        }
+        let seen: HashSet<String> = tasks.iter().map(|t| t.uid.clone()).collect();
+        for uid in last.keys() {
+            if !seen.contains(uid) && !deleted.iter().any(|d| &d.uid == uid) {
+                deleted.push(Tombstone { uid: uid.clone(), at: now });
+            }
+        }
+        deleted.retain(|d| !seen.contains(&d.uid));
+        *last = tasks.iter().map(|t| (t.uid.clone(), t.clone())).collect();
+    }
+
+    /// O estado de agora passa a ser a referência para a próxima gravação (depois de mesclar com outro aparelho,
+    /// para o que veio de lá não ser carimbado de novo como mudança daqui).
+    pub fn mark_synced(&mut self) {
+        self.last = self.tasks.iter().map(|t| (t.uid.clone(), t.clone())).collect();
+    }
+
+    /// Entra uma tarefa vinda de outro aparelho, com um id local novo.
+    pub fn adopt(&mut self, mut task: Task) -> u64 {
+        self.next_id += 1;
+        task.id = self.next_id;
+        self.tasks.push(task);
+        self.dirty = true;
+        self.next_id
+    }
+
+    pub fn find_uid(&self, uid: &str) -> Option<usize> {
+        self.tasks.iter().position(|t| t.uid == uid)
+    }
+
+    pub fn remove_uid(&mut self, uid: &str) {
+        self.tasks.retain(|t| t.uid != uid);
+        self.dirty = true;
+    }
+
+    /// Tarefas de versões sem sincronização ganham identidade e carimbo; o retrato da última gravação começa daqui.
+    fn migrate(&mut self) {
+        let legacy = self.tasks.iter().any(|t| t.uid.is_empty() || t.stamps == Stamps::default());
+        if legacy {
+            let now = self.now_stamp();
+            for t in &mut self.tasks {
+                if t.uid.is_empty() {
+                    t.uid = fresh_uid();
+                }
+                if t.stamps == Stamps::default() {
+                    for g in Group::ALL {
+                        t.stamps.set(g, now);
+                    }
+                }
+            }
+            self.dirty = true;
+        }
+        self.mark_synced();
+    }
+
     pub fn add(&mut self, title: String, date: Option<NaiveDate>) -> u64 {
         self.next_id += 1;
         self.tasks.push(Task {
             id: self.next_id,
+            uid: fresh_uid(),
+            stamps: Stamps::default(),
             title,
             notes: String::new(),
             done: false,
@@ -324,7 +601,9 @@ impl Store {
     }
 
     pub fn set_tag_color(&mut self, tag: &str, rgb: [u8; 3]) {
+        let now = self.now_stamp();
         self.tag_colors.insert(tag.to_owned(), rgb);
+        self.tag_stamps.insert(tag.to_owned(), now);
         self.dirty = true;
     }
 
@@ -344,14 +623,19 @@ impl Store {
             }
         }
         let color = tag_rgb(&self.tag_colors, from);
+        let now = self.now_stamp();
         self.tag_colors.remove(from);
+        self.tag_stamps.insert(from.to_owned(), now);
         self.tag_colors.entry(to.to_owned()).or_insert(color);
+        self.tag_stamps.insert(to.to_owned(), now);
         self.dirty = true;
     }
 
     pub fn delete_tag(&mut self, tag: &str) {
+        let now = self.now_stamp();
         self.tasks.iter_mut().for_each(|t| t.tags.retain(|x| x != tag));
         self.tag_colors.remove(tag);
+        self.tag_stamps.insert(tag.to_owned(), now);
         self.dirty = true;
     }
 
@@ -367,15 +651,18 @@ impl Store {
     pub fn load() -> Self {
         let path = Self::path();
         let Ok(text) = std::fs::read_to_string(&path) else { return Self::default() };
-        serde_json::from_str(&text).unwrap_or_else(|_| {
+        let mut store: Self = serde_json::from_str(&text).unwrap_or_else(|_| {
             // Arquivo ilegível: guarda uma cópia antes que a próxima gravação o substitua por uma lista vazia.
             let stamp = Local::now().format("%Y%m%d_%H%M%S");
             let _ = std::fs::copy(&path, path.with_file_name(format!("tasks_ilegivel_{stamp}.json")));
             Self::default()
-        })
+        });
+        store.migrate();
+        store
     }
 
     pub fn save(&mut self) {
+        self.stamp_changes();
         self.dirty = false;
         let path = Self::path();
         if let Some(dir) = path.parent() {
@@ -536,6 +823,80 @@ mod tests {
     }
 
     #[test]
+    fn gravar_carimba_so_o_que_mudou_e_guarda_as_exclusoes() {
+        let mut s = Store::default();
+        let a = s.add("A".into(), None);
+        let b = s.add("B".into(), None);
+        assert_ne!(s.tasks[0].uid, s.tasks[1].uid, "identidades diferentes");
+        assert_eq!(s.tasks[0].stamps, Stamps::default(), "o carimbo só vem na gravação");
+        s.stamp_changes();
+        let first = s.tasks[0].stamps;
+        assert!(first.title > 0 && first.latest() == first.title, "tarefa nova: todos os grupos carimbados juntos");
+        assert_eq!(s.deleted.len(), 0);
+
+        // Muda só o título de A: só o grupo do título ganha carimbo novo.
+        s.tasks[0].title = "A2".into();
+        s.stamp_changes();
+        let second = s.tasks[0].stamps;
+        assert!(second.title > first.title);
+        assert_eq!((second.notes, second.state, second.tags), (first.notes, first.state, first.tags));
+        assert_eq!(s.tasks[1].stamps, first, "B não mudou, não é carimbada");
+
+        // Excluir B deixa uma lápide; desfazer a tira.
+        let copy = s.tasks[1].clone();
+        s.remove(b);
+        s.stamp_changes();
+        assert_eq!(s.deleted.len(), 1);
+        assert_eq!(s.deleted[0].uid, copy.uid);
+        assert!(s.deleted[0].at >= second.title);
+        s.restore(copy, 1);
+        s.stamp_changes();
+        assert!(s.deleted.is_empty(), "a tarefa voltou: a lápide some");
+        let _ = a;
+    }
+
+    #[test]
+    fn relogio_de_sincronizacao_nunca_volta() {
+        let mut s = Store::default();
+        s.clock = 9_000_000_000_000; // muito à frente do relógio real
+        let a = s.now_stamp();
+        let b = s.now_stamp();
+        assert_eq!((a, b), (9_000_000_000_001, 9_000_000_000_002));
+        s.bump_clock(1);
+        assert_eq!(s.clock, b, "um carimbo menor não o puxa para trás");
+    }
+
+    #[test]
+    fn recorrencia_e_conclusao_seguem_os_casos_compartilhados() {
+        // Os mesmos casos que o N.avi do celular vai rodar (docs/sync-casos/recorrencia.json).
+        let text = include_str!("../docs/sync-casos/recorrencia.json");
+        let doc: serde_json::Value = serde_json::from_str(text).unwrap();
+        let day = |v: &serde_json::Value| NaiveDate::parse_from_str(v.as_str().unwrap(), "%Y-%m-%d").unwrap();
+        let mut n = 0;
+        for case in doc["casos"].as_array().unwrap() {
+            let name = case["nome"].as_str().unwrap();
+            let sync: crate::sync::SyncTask = serde_json::from_value(case["tarefa"].clone()).unwrap();
+            let mut t = sync.to_task(1);
+            for d in case["ocorre_em"].as_array().into_iter().flatten() {
+                assert!(t.occurs_on(day(d)), "{name}: devia ocorrer em {d}");
+            }
+            for d in case["nao_ocorre_em"].as_array().into_iter().flatten() {
+                assert!(!t.occurs_on(day(d)), "{name}: não devia ocorrer em {d}");
+            }
+            if let Some(c) = case.get("concluir") {
+                t.done = true;
+                t.roll_over_on(day(&c["hoje"]));
+                let after = &c["depois"];
+                assert_eq!(t.date, Some(day(&after["date"])), "{name}: data depois de concluir");
+                assert_eq!(t.done, after["done"].as_bool().unwrap(), "{name}: concluída depois");
+                assert_eq!(t.repeat_times, after["repeat_times"].as_u64().map(|n| n as u32), "{name}: vezes restantes");
+            }
+            n += 1;
+        }
+        assert!(n >= 9, "os casos foram lidos");
+    }
+
+    #[test]
     fn desfazer_devolve_a_tarefa_ao_lugar() {
         let mut s = Store::default();
         let ids: Vec<u64> = ["a", "b", "c"].iter().map(|t| s.add((*t).into(), None)).collect();
@@ -667,6 +1028,10 @@ pub struct Settings {
     pub backup_dir: Option<PathBuf>,
     /// Quando o último backup deu certo.
     pub last_backup: Option<NaiveDateTime>,
+    /// Pasta da sincronização entre aparelhos (uma pasta de nuvem). `None` = desligada.
+    pub sync_dir: Option<PathBuf>,
+    /// Identidade deste aparelho no arquivo de sincronização (só informativa).
+    pub device_id: String,
 }
 
 impl Default for Settings {
@@ -681,6 +1046,8 @@ impl Default for Settings {
             widget_place: None,
             backup_dir: None,
             last_backup: None,
+            sync_dir: None,
+            device_id: String::new(),
         }
     }
 }
@@ -720,6 +1087,10 @@ impl Settings {
         let mut s: Self =
             std::fs::read_to_string(Self::path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         s.normalize();
+        if s.device_id.is_empty() {
+            s.device_id = fresh_uid();
+            s.save();
+        }
         s
     }
 

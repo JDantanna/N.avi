@@ -236,6 +236,8 @@ fn when_label(at: NaiveDateTime, now: NaiveDateTime) -> String {
 pub enum Request {
     BackupNow,
     Restore(Prepared),
+    /// A pasta de sincronização acabou de ser escolhida: sincronizar já.
+    SyncNow,
 }
 
 /// Situação para o ícone da barra superior.
@@ -354,7 +356,7 @@ impl Backup {
     }
 
     /// Janela de backup. Retorna o que precisa do app para acontecer.
-    pub fn window(&mut self, ctx: &egui::Context, settings: &mut Settings) -> Option<Request> {
+    pub fn window(&mut self, ctx: &egui::Context, settings: &mut Settings, sync: &crate::sync::Status) -> Option<Request> {
         if !self.open {
             self.clouds = None;
             return None;
@@ -368,6 +370,9 @@ impl Backup {
         let mut pick_folder = false;
         let mut pick_file = false;
         let mut turn_off = false;
+        let mut choose_sync = None;
+        let mut pick_sync_folder = false;
+        let mut sync_off = false;
         egui::Window::new("Backup")
             .open(&mut open)
             .collapsible(false)
@@ -444,6 +449,41 @@ impl Backup {
                 ui.add_space(4.0);
                 ui.separator();
                 pick_file = ui.button("Restaurar um backup...").clicked();
+
+                // Sincronização entre aparelhos: o mesmo arquivo que o N.avi do celular lê e grava.
+                ui.add_space(8.0);
+                ui.separator();
+                ui.push_id("sincronizacao", |ui| {
+                    ui.label(RichText::new("Sincronização com o celular").strong());
+                    let (color, text) = match sync {
+                        crate::sync::Status::Off => {
+                            (Color32::from_rgb(240, 180, 90), "Desligada. Escolha uma pasta de nuvem para as tarefas ficarem iguais em todos os aparelhos.".to_owned())
+                        }
+                        crate::sync::Status::Working => (crate::theme::ACCENT, "Sincronizando...".to_owned()),
+                        crate::sync::Status::Ok(at) => (Color32::from_rgb(90, 200, 130), format!("Sincronizado {}.", when_label(*at, now))),
+                        crate::sync::Status::Error(e) => (Color32::LIGHT_RED, e.clone()),
+                    };
+                    ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
+                    if let Some(dir) = &settings.sync_dir {
+                        ui.label(RichText::new("Pasta").size(12.5).color(Color32::from_gray(150)));
+                        ui.add(egui::Label::new(dir.to_string_lossy().into_owned()).wrap());
+                    }
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        for (name, path) in &clouds {
+                            let target = crate::sync::suggested_folder(name, path);
+                            let current = settings.sync_dir.as_ref() == Some(&target);
+                            if ui.selectable_label(current, *name).on_hover_text(target.to_string_lossy().into_owned()).clicked() && !current {
+                                choose_sync = Some(target);
+                            }
+                        }
+                        pick_sync_folder = ui.button("Outra pasta...").clicked();
+                        if settings.sync_dir.is_some() {
+                            sync_off = ui.add(egui::Button::new("Desligar").frame(false)).clicked();
+                        }
+                    });
+                    ui.weak("Só tarefas e tags; o Monitoramento fica neste computador. Nenhuma senha é guardada no app.");
+                });
             });
         self.open = open;
         if !open {
@@ -470,6 +510,22 @@ impl Backup {
             settings.last_backup = None;
             settings.save();
             self.error = None;
+        }
+        if pick_sync_folder {
+            let mut dialog = rfd::FileDialog::new().set_title("Pasta da sincronização");
+            if let Some(dir) = settings.sync_dir.as_ref().or(settings.backup_dir.as_ref()) {
+                dialog = dialog.set_directory(dir);
+            }
+            choose_sync = dialog.pick_folder().or(choose_sync);
+        }
+        if let Some(dir) = choose_sync {
+            settings.sync_dir = Some(dir);
+            settings.save();
+            request = Some(Request::SyncNow);
+        }
+        if sync_off {
+            settings.sync_dir = None;
+            settings.save();
         }
         if pick_file {
             let mut dialog = rfd::FileDialog::new().add_filter(format!("Backup do {}", brand::NAME), &["zip"]).set_title("Restaurar um backup");

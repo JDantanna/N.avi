@@ -1,0 +1,55 @@
+{
+  "descricao": "Casos de recorrencia compartilhados entre o N.avi do computador (Rust) e o do celular. 'tarefa' usa os mesmos campos do arquivo de sincronizacao. 'ocorre_em' e 'nao_ocorre_em' testam em que dias a tarefa aparece; 'concluir' testa o que acontece ao marcar como concluida no dia 'hoje' (rolagem para a proxima ocorrencia).",
+  "casos": [
+    {
+      "nome": "mensal no dia 30 volta ao 30 depois de fevereiro",
+      "tarefa": { "uid": "a", "title": "Aluguel", "date": "2026-01-30", "repeat": "Monthly", "every": 1, "anchor_day": 30 },
+      "ocorre_em": ["2026-01-30", "2026-02-28", "2026-03-30"],
+      "nao_ocorre_em": ["2026-03-29", "2025-12-30", "2026-02-27"]
+    },
+    {
+      "nome": "repeticao finita de 3 meses",
+      "tarefa": { "uid": "b", "title": "Parcela", "date": "2026-01-05", "repeat": "Monthly", "every": 1, "anchor_day": 5, "repeat_times": 3 },
+      "ocorre_em": ["2026-01-05", "2026-02-05", "2026-03-05"],
+      "nao_ocorre_em": ["2026-04-05", "2026-05-05"]
+    },
+    {
+      "nome": "a cada 2 dias",
+      "tarefa": { "uid": "c", "title": "Regar", "date": "2026-11-01", "repeat": "Daily", "every": 2 },
+      "ocorre_em": ["2026-11-01", "2026-11-03", "2026-11-05"],
+      "nao_ocorre_em": ["2026-11-02", "2026-10-30"]
+    },
+    {
+      "nome": "semanal",
+      "tarefa": { "uid": "d", "title": "Feira", "date": "2026-11-02", "repeat": "Weekly", "every": 1 },
+      "ocorre_em": ["2026-11-02", "2026-11-09", "2026-11-16"],
+      "nao_ocorre_em": ["2026-11-08", "2026-11-10"]
+    },
+    {
+      "nome": "sem repeticao, so no dia",
+      "tarefa": { "uid": "e", "title": "Prova", "date": "2026-11-20" },
+      "ocorre_em": ["2026-11-20"],
+      "nao_ocorre_em": ["2026-11-19", "2026-11-21", "2026-12-20"]
+    },
+    {
+      "nome": "concluir uma mensal do dia 30 em janeiro leva para 28 de fevereiro",
+      "tarefa": { "uid": "a", "title": "Aluguel", "date": "2026-01-30", "repeat": "Monthly", "every": 1, "anchor_day": 30 },
+      "concluir": { "hoje": "2026-01-30", "depois": { "date": "2026-02-28", "done": false, "repeat_times": null } }
+    },
+    {
+      "nome": "concluir pula as ocorrencias que ja passaram",
+      "tarefa": { "uid": "c", "title": "Regar", "date": "2026-11-01", "repeat": "Daily", "every": 2 },
+      "concluir": { "hoje": "2026-11-10", "depois": { "date": "2026-11-11", "done": false, "repeat_times": null } }
+    },
+    {
+      "nome": "concluir a penultima de uma finita deixa uma",
+      "tarefa": { "uid": "f", "title": "Dose", "date": "2026-11-05", "repeat": "Daily", "every": 1, "repeat_times": 2 },
+      "concluir": { "hoje": "2026-11-05", "depois": { "date": "2026-11-06", "done": false, "repeat_times": 1 } }
+    },
+    {
+      "nome": "concluir a ultima de uma finita fica concluida",
+      "tarefa": { "uid": "g", "title": "Dose", "date": "2026-11-06", "repeat": "Daily", "every": 1, "repeat_times": 1 },
+      "concluir": { "hoje": "2026-11-06", "depois": { "date": "2026-11-06", "done": true, "repeat_times": 1 } }
+    }
+  ]
+}

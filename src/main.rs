@@ -15,6 +15,7 @@ mod monitor;
 mod notify;
 mod planner;
 mod splash;
+mod sync;
 mod tasks;
 mod theme;
 mod tray;
@@ -68,6 +69,8 @@ pub(crate) struct App {
     quitting: bool,
     pub(crate) settings: Settings,
     pub(crate) backup: backup::Backup,
+    /// Sincronização das tarefas com os outros aparelhos, pela pasta de nuvem.
+    sync: sync::Sync,
     /// Backup a colocar no lugar dos dados quando o app terminar de fechar.
     restore_pending: Option<backup::Prepared>,
     /// Desde quando há mudanças nas tarefas ainda não gravadas (no relógio da interface).
@@ -113,6 +116,7 @@ impl App {
             quitting: false,
             settings,
             backup: backup::Backup::new(),
+            sync: sync::Sync::new(),
             restore_pending: None,
             dirty_since: None,
             prefs_dirty_at: None,
@@ -324,12 +328,24 @@ impl App {
         }
     }
 
-    /// Grava as mudanças pendentes das tarefas agora.
+    /// Grava as mudanças pendentes das tarefas agora (e avisa a sincronização de que há algo a mandar).
     fn save_store(&mut self) {
         self.dirty_since = None;
         if self.store.dirty {
             self.store.save();
+            self.sync.mark_pending();
         }
+    }
+
+    /// Um passo da sincronização com os outros aparelhos; o que vier deles entra nas tarefas e é gravado
+    /// pelo caminho normal.
+    fn sync_tick(&mut self, ctx: &egui::Context) {
+        let Some(dir) = self.settings.sync_dir.clone() else { return };
+        let time = ctx.input(|i| i.time);
+        if self.sync.tick(&mut self.store, Some(&dir), &self.settings.device_id, time) {
+            ctx.request_repaint();
+        }
+        ctx.request_repaint_after(self.sync.until_check(time));
     }
 
     /// Faz o backup com os dados em disco já atualizados.
@@ -356,7 +372,12 @@ impl App {
     }
 
     fn backup_requests(&mut self, ctx: &egui::Context) {
-        match self.backup.window(ctx, &mut self.settings) {
+        let status = self.sync.status(self.settings.sync_dir.is_some());
+        match self.backup.window(ctx, &mut self.settings, &status) {
+            Some(backup::Request::SyncNow) => {
+                self.save_store();
+                self.sync.kick();
+            }
             Some(backup::Request::BackupNow) => {
                 if let Some(dir) = self.settings.backup_dir.clone() {
                     self.start_backup(ctx, dir);
@@ -621,6 +642,7 @@ impl App {
 
         self.backup_requests(&ctx);
         self.backup_tick(&ctx);
+        self.sync_tick(&ctx);
 
         if self.store.dirty {
             let time = ctx.input(|i| i.time);
@@ -649,6 +671,10 @@ impl eframe::App for App {
         }
         self.save_store();
         self.tracker.save_now();
+        // As últimas mudanças vão para o arquivo de sincronização antes de o app fechar.
+        if let Some(dir) = &self.settings.sync_dir {
+            self.sync.flush(&mut self.store, dir, &self.settings.device_id);
+        }
         match self.restore_pending.take() {
             Some(prepared) => self.finish_restore(prepared),
             None => self.final_backup(),
