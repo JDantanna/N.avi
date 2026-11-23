@@ -411,6 +411,11 @@ pub struct Store {
     /// gravação descobre o que mudou e carimba só os grupos certos.
     #[serde(skip)]
     last: HashMap<String, Task>,
+    /// As tarefas como estavam **ao fim da última mesclagem**, por `uid`: a base com que a mesclagem descobre se
+    /// os dois lados mudaram o mesmo grupo desde então. Separada de `last`, que toda gravação refaz; e gravada
+    /// no disco, porque a mesclagem seguinte pode ser em outra execução.
+    #[serde(default)]
+    base: HashMap<String, Task>,
 }
 
 impl Store {
@@ -471,21 +476,26 @@ impl Store {
         *last = tasks.iter().map(|t| (t.uid.clone(), t.clone())).collect();
     }
 
-    /// O estado de agora passa a ser a referência para a próxima gravação (depois de mesclar com outro aparelho,
-    /// para o que veio de lá não ser carimbado de novo como mudança daqui).
+    /// Ao fim de uma mesclagem: o estado de agora passa a ser a referência da próxima gravação (o que veio de
+    /// fora não é carimbado de novo como mudança daqui) e a base da próxima mesclagem.
     pub fn mark_synced(&mut self) {
+        self.mark_saved();
         self.set_reference(&self.tasks.clone());
     }
 
-    /// Uma referência dada (nos testes: o estado da última sincronização que o caso descreve).
-    pub fn set_reference(&mut self, tasks: &[Task]) {
-        self.last = tasks.iter().map(|t| (t.uid.clone(), t.clone())).collect();
+    /// Só a referência de carimbar (ao carregar: ninguém mesclou nada, a base continua a que estava gravada).
+    fn mark_saved(&mut self) {
+        self.last = self.tasks.iter().map(|t| (t.uid.clone(), t.clone())).collect();
     }
 
-    /// A tarefa `uid` como estava na última gravação ou mesclagem: a base para saber se os dois lados mudaram
-    /// o mesmo grupo desde então.
+    /// Uma base dada (nos testes: o estado da última mesclagem que o caso descreve).
+    pub fn set_reference(&mut self, tasks: &[Task]) {
+        self.base = tasks.iter().map(|t| (t.uid.clone(), t.clone())).collect();
+    }
+
+    /// A tarefa `uid` como estava ao fim da última mesclagem.
     pub fn reference(&self, uid: &str) -> Option<&Task> {
-        self.last.get(uid)
+        self.base.get(uid)
     }
 
     /// Entra uma tarefa vinda de outro aparelho, com um id local novo.
@@ -523,7 +533,7 @@ impl Store {
             }
             self.dirty = true;
         }
-        self.mark_synced();
+        self.mark_saved();
     }
 
     pub fn add(&mut self, title: String, date: Option<NaiveDate>) -> u64 {

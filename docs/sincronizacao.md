@@ -123,9 +123,10 @@ mesmos dados chegam ao mesmo resultado, em qualquer ordem.
 
 ### Os dois lados mudaram o mesmo grupo: combinar, não escolher
 
-A regra 1 (vence o carimbo maior) só vale quando um lado mudou. Cada aparelho guarda a tarefa como estava na
-**última mesclagem que ele conhece** (a referência de `mark_synced`, a mesma que decide o que carimbar). Se, em
-relação a essa base, **os dois lados mudaram o mesmo grupo** e os valores diferem, o grupo é combinado, para
+A regra 1 (vence o carimbo maior) só vale quando um lado mudou. Cada aparelho guarda a tarefa como estava **ao
+fim da última mesclagem que ele fez** (`Store.base`): um retrato à parte, atualizado só por `mark_synced` e gravado
+no disco com as tarefas, porque a mesclagem seguinte pode ser em outra execução. Não serve a referência de
+carimbar, que toda gravação refaz e por isso é sempre igual ao local. Se, em relação a essa base, **os dois lados mudaram o mesmo grupo** e os valores diferem, o grupo é combinado, para
 nada se perder:
 
 - **tags**: união (as daqui na ordem daqui, depois as de lá que faltavam);

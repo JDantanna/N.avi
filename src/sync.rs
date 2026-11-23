@@ -803,10 +803,11 @@ impl Sync {
             changed_local = true;
         }
         self.pending = false;
-        if changed_local {
+        // Com arquivo lido, a base da próxima mesclagem muda e precisa ir ao disco, mesmo sem mudança nas tarefas.
+        if changed_local || remote.is_some() {
             store.dirty = true;
         }
-        // O estado mesclado passa a ser a referência: o que veio de fora não é recarimbado como edição daqui.
+        // O estado mesclado passa a ser a referência de carimbar e a base da próxima mesclagem.
         store.mark_synced();
 
         let file = SyncFile::from_store(store, device);
@@ -895,11 +896,9 @@ impl Sync {
                 break;
             }
         }
-        if changed_local {
-            // O que entrou na saída fica gravado aqui também, senão voltaria a ser mesclado na próxima abertura.
-            store.dirty = true;
-            store.save();
-        }
+        // O que entrou na saída, e a base da próxima mesclagem, ficam gravados aqui também.
+        store.dirty = true;
+        store.save();
         self.pending = false;
     }
 }
@@ -1063,6 +1062,28 @@ mod tests {
         let (mut s, r) = three_way(&base, &local, &cleared);
         let out = merge(&mut s, Some(&r), "t", NOW);
         assert_eq!(out.file.tasks[0].notes, "Levar documentos e exames");
+    }
+
+    #[test]
+    fn combinacao_vale_no_fluxo_real_com_gravacao_no_meio_e_sobrevive_ao_disco() {
+        // A base é o fim da última mesclagem, não a última gravação: gravar entre as duas não a apaga.
+        let mut base = task("a", "Reunião", 100);
+        base.tags = vec!["trabalho".into()];
+        let mut s = store_from(&file(vec![base.clone()], vec![])); // mesclou: base = ["trabalho"]
+        s.tasks[0].tags.push("urgente".into());
+        s.save(); // carimba e refaz a referência de carimbar; a base fica
+        assert_eq!(s.reference("a").unwrap().tags, ["trabalho"]);
+        let mut remote = base.clone();
+        remote.tags.push("cliente".into());
+        remote.stamps.set(Group::Tags, Utc::now().timestamp_millis() + 60_000);
+        let now = Utc::now().timestamp_millis();
+        let out = merge(&mut s, Some(&file(vec![remote], vec![])), "t", now);
+        assert_eq!(out.file.tasks[0].tags, ["trabalho", "urgente", "cliente"], "os dois lados mudaram: união");
+        s.mark_synced();
+        // A base vai ao disco com o Store e volta na próxima execução.
+        let text = serde_json::to_string(&s).unwrap();
+        let again: Store = serde_json::from_str(&text).unwrap();
+        assert_eq!(again.reference("a").unwrap().tags, ["trabalho", "urgente", "cliente"]);
     }
 
     #[test]
