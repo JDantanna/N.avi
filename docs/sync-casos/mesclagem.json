@@ -87,6 +87,20 @@
       "esperado": { "tasks": [ { "uid": "a", "title": "Consulta", "notes": "Levar RG\n\n--- versão de outro aparelho ---\nLevar documentos e exames", "stamps": { "title": 1764000000100, "notes": 1764001000000 } } ], "deleted": [], "tags": {} }
     },
     {
+      "nome": "o lado vencedor apagou as informacoes: fica o texto do outro lado, sem separador",
+      "base": { "tasks": [ { "uid": "a", "title": "Consulta", "notes": "Levar documentos", "stamps": { "title": 1764000000100, "notes": 1764000000100 } } ] },
+      "local": { "tasks": [ { "uid": "a", "title": "Consulta", "notes": "Levar documentos e exames", "stamps": { "title": 1764000000100, "notes": 1764000000300 } } ], "deleted": [], "tags": {} },
+      "remoto": { "tasks": [ { "uid": "a", "title": "Consulta", "notes": "", "stamps": { "title": 1764000000100, "notes": 1764000000400 } } ], "deleted": [], "tags": {} },
+      "esperado": { "tasks": [ { "uid": "a", "title": "Consulta", "notes": "Levar documentos e exames", "stamps": { "title": 1764000000100, "notes": 1764001000000 } } ], "deleted": [], "tags": {} }
+    },
+    {
+      "nome": "um lado ja contem a versao do outro (combinacao anterior): fica o maior, sem acrescentar de novo",
+      "base": { "tasks": [ { "uid": "a", "title": "Consulta", "notes": "Levar documentos", "stamps": { "title": 1764000000100, "notes": 1764000000100 } } ] },
+      "local": { "tasks": [ { "uid": "a", "title": "Consulta", "notes": "Levar RG\n\n--- versão de outro aparelho ---\nLevar documentos e exames", "stamps": { "title": 1764000000100, "notes": 1764000000500 } } ], "deleted": [], "tags": {} },
+      "remoto": { "tasks": [ { "uid": "a", "title": "Consulta", "notes": "Levar RG", "stamps": { "title": 1764000000100, "notes": 1764000000400 } } ], "deleted": [], "tags": {} },
+      "esperado": { "tasks": [ { "uid": "a", "title": "Consulta", "notes": "Levar RG\n\n--- versão de outro aparelho ---\nLevar documentos e exames", "stamps": { "title": 1764000000100, "notes": 1764001000000 } } ], "deleted": [], "tags": {} }
+    },
+    {
       "nome": "o mesmo valor nos dois lados nunca e conflito: so o carimbo converge para o maior",
       "base": { "tasks": [ { "uid": "a", "title": "Consulta", "notes": "a", "stamps": { "title": 1764000000100, "notes": 1764000000100 } } ] },
       "local": { "tasks": [ { "uid": "a", "title": "Consulta", "notes": "b", "stamps": { "title": 1764000000100, "notes": 1764000000300 } } ], "deleted": [], "tags": {} },

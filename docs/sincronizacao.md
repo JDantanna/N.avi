@@ -133,7 +133,10 @@ nada se perder:
 - **checklist**: união por item (pelo título), e o item fica concluído se **qualquer** lado o concluiu. Um item
   apagado num lado pode voltar; aceitável, porque não perde nada;
 - **informações**: fica o texto que venceria pela regra 1 e, embaixo de uma linha
-  `--- versão de outro aparelho ---`, o texto do outro lado (só se ele não estiver vazio).
+  `--- versão de outro aparelho ---`, o texto do outro lado. Se um lado está vazio (apagou), fica só o outro,
+  sem separador; se um lado já contém o outro (uma combinação anterior), fica o maior, sem acrescentar de novo.
+  Cópias de conflito são mescladas uma a uma, e o resultado de cada mesclagem vira a base da seguinte, para a
+  mesma versão não ser acrescentada duas vezes.
 
 O grupo combinado recebe um **carimbo novo**, `max(agora, clock + 1)`, à frente de tudo o que o aparelho já viu:
 assim o resultado combinado vence as duas versões em qualquer outro aparelho pela regra 1, e os dois convergem.
@@ -193,7 +196,9 @@ Restaurar o zip troca os dados por um estado antigo, com carimbos antigos; a mes
 tudo o que o arquivo tem de mais novo, inclusive as lápides, desfazendo o que a pessoa quis recuperar. Por isso,
 ao concluir a restauração, **tudo o que foi restaurado é recarimbado como editado agora** (tarefas, grupo a
 grupo, e cores de tags), com o relógio à frente do de antes da restauração, e a janela avisa disso antes de
-restaurar. O que só existe nos outros aparelhos (criado depois do backup) continua lá e volta pela mesclagem:
+restaurar. A **base** continua a de antes da restauração: uma anotação, item de checklist ou tag que outro
+aparelho mudou depois do backup é combinada com o restaurado (seção "combinar, não escolher"), não apagada por
+ele; título e estado seguem o restaurado. O que só existe nos outros aparelhos (criado depois do backup) continua lá e volta pela mesclagem:
 restaurar recupera, não apaga. A pasta de sincronização e a identidade do aparelho não vêm do backup: são desta
 máquina. Um backup de antes dos `uid`s ganha `uid`s novos ao carregar e passa pela regra 8 da mesclagem, que
 casa cada tarefa com a do arquivo em vez de duplicá-la.

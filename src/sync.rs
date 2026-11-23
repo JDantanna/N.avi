@@ -327,11 +327,15 @@ pub fn combine(local: &mut Task, incoming: &Task, g: Group) -> bool {
             let (ls, rs) = (local.stamps.get(g), incoming.stamps.get(g));
             let local_wins = ls > rs || (ls == rs && local.group_key(g) >= incoming.group_key(g));
             let (winner, loser) = if local_wins { (&local.notes, &incoming.notes) } else { (&incoming.notes, &local.notes) };
-            // Um dos lados apagou o texto: fica o que sobrou, sem separador.
-            local.notes = match (winner.trim().is_empty(), loser.trim().is_empty()) {
-                (true, _) => loser.clone(),
-                (_, true) => winner.clone(),
-                _ => format!("{}\n\n{OTHER_VERSION_MARK}\n{}", winner.trim_end(), loser.trim()),
+            // Um dos lados apagou o texto: fica o que sobrou, sem separador. Um lado já contém o outro (uma
+            // combinação anterior, por exemplo): fica o maior, sem acrescentar de novo.
+            let (w, l) = (winner.trim(), loser.trim());
+            local.notes = if l.is_empty() || w.contains(l) {
+                winner.clone()
+            } else if w.is_empty() || l.contains(w) {
+                loser.clone()
+            } else {
+                format!("{}\n\n{OTHER_VERSION_MARK}\n{l}", winner.trim_end())
             };
             true
         }
@@ -794,6 +798,8 @@ impl Sync {
             if let Ok(f) = parse(bytes)
                 && f.schema <= SCHEMA
             {
+                // O resultado até aqui é a base da próxima: uma cópia com a mesma origem não combina de novo.
+                store.mark_synced();
                 changed_local |= merge(store, Some(&f), device, now).changed_local;
                 shelved.push(copy_path.clone());
             }
@@ -878,6 +884,7 @@ impl Sync {
                 if let Ok(f) = parse(bytes)
                     && f.schema <= SCHEMA
                 {
+                    store.mark_synced();
                     changed_local |= merge(store, Some(&f), device, now).changed_local;
                     shelve(copy_path);
                 }
@@ -1062,6 +1069,40 @@ mod tests {
         let (mut s, r) = three_way(&base, &local, &cleared);
         let out = merge(&mut s, Some(&r), "t", NOW);
         assert_eq!(out.file.tasks[0].notes, "Levar documentos e exames");
+        // Um lado já tem a combinação (contém o outro): não acrescenta de novo, de nenhum dos dois lados.
+        let mut combined = base.clone();
+        combined.notes = format!("Levar RG\n\n{OTHER_VERSION_MARK}\nLevar documentos e exames");
+        combined.stamps.set(Group::Notes, 500);
+        let (mut s, r) = three_way(&base, &combined, &remote);
+        let out = merge(&mut s, Some(&r), "t", NOW);
+        assert_eq!(out.file.tasks[0].notes, combined.notes, "o vencedor já contém o perdedor");
+        let (mut s, r) = three_way(&base, &local, &combined);
+        let out = merge(&mut s, Some(&r), "t", NOW);
+        assert_eq!(out.file.tasks[0].notes, combined.notes, "o perdedor já contém o vencedor");
+    }
+
+    #[test]
+    fn copia_de_conflito_com_a_mesma_origem_nao_combina_de_novo() {
+        // Furo da reauditoria final: "A --- B" virava "A --- B --- B" ao mesclar uma cópia com a mesma base.
+        let dir = temp_dir("copia_mesma_origem");
+        let mut base = task("a", "Consulta", 100);
+        base.notes = "A".into();
+        let mut remote = base.clone();
+        remote.notes = "B".into();
+        remote.stamps.set(Group::Notes, 400);
+        std::fs::write(dir.join(FILE_NAME), json(&file(vec![remote.clone()], vec![]))).unwrap();
+        std::fs::write(dir.join("N.avi.sync (1).json"), json(&file(vec![remote], vec![]))).unwrap();
+        let mut local = base.clone();
+        local.notes = "A editado".into();
+        local.stamps.set(Group::Notes, 300);
+        let mut store = store_from(&file(vec![local], vec![]));
+        store.set_reference(&[base.to_task(1)]);
+        let mut sync = Sync::new();
+        sync.kick();
+        let mut time = 0.0;
+        run(&mut sync, &mut store, &dir, "pc", &mut time, 0.05);
+        assert_eq!(store.tasks[0].notes, format!("B\n\n{OTHER_VERSION_MARK}\nA editado"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

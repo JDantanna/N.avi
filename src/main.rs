@@ -414,7 +414,7 @@ impl App {
             // O restaurado vale como editado agora: senão a sincronização o desfaria com o que o arquivo tem de
             // mais novo (inclusive as exclusões que a pessoa quis reverter).
             let mut store = Store::load();
-            store.restamp_all(self.store.clock);
+            store.restamp_all(&self.store);
             store.save();
         }
         if let Ok(exe) = std::env::current_exe() {

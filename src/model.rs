@@ -614,9 +614,11 @@ impl Store {
 
     /// Depois de restaurar um backup: tudo o que foi restaurado passa a valer como editado agora, para a
     /// sincronização não desfazer a restauração com o que o arquivo tem de mais novo (inclusive lápides).
-    /// `floor` é o relógio de antes da restauração, para os carimbos novos ficarem à frente dele.
-    pub fn restamp_all(&mut self, floor: i64) {
-        self.bump_clock(floor);
+    /// `before` é o estado de antes da restauração: o relógio dele fica à frente, e a **base** dele continua
+    /// sendo a base, para uma edição feita em outro aparelho depois do backup ser combinada com o restaurado
+    /// (informações, checklist, tags) em vez de apagada por ele.
+    pub fn restamp_all(&mut self, before: &Store) {
+        self.bump_clock(before.clock);
         let now = self.now_stamp();
         for t in &mut self.tasks {
             for g in Group::ALL {
@@ -629,7 +631,9 @@ impl Store {
         for name in self.tag_colors.keys() {
             self.tag_stamps.insert(name.clone(), now);
         }
-        self.mark_synced();
+        self.base = before.base.clone();
+        self.synced_once = before.synced_once;
+        self.mark_saved();
         self.dirty = true;
     }
 
@@ -930,22 +934,35 @@ mod tests {
     #[test]
     fn restaurar_backup_recarimba_tudo_para_vencer_o_arquivo() {
         // Furo 8 da auditoria: sem isto, a sincronização desfaz a restauração com o que o arquivo tem de mais novo.
+        // O backup: a tarefa com anotações antigas.
         let mut s = Store::default();
         s.add("Antiga".into(), None);
+        s.tasks[0].notes = "anotação do backup".into();
         s.set_tag_color("casa", [1, 2, 3]);
         s.save();
         let old = s.tasks[0].stamps.latest();
         let uid = s.tasks[0].uid.clone();
-        s.restamp_all(old + 1_000_000);
+        // O estado de antes da restauração: já sincronizado, com a base conhecendo a tarefa com outras anotações.
+        let mut before = Store::default();
+        before.clock = old + 1_000_000;
+        before.synced_once = true;
+        let mut known = s.tasks[0].clone();
+        known.notes = "anotação sincronizada".into();
+        before.set_reference(&[known]);
+        s.restamp_all(&before);
         let fresh = s.tasks[0].stamps.latest();
         assert!(fresh > old + 1_000_000, "à frente do relógio de antes da restauração");
         assert!(Group::ALL.iter().all(|g| s.tasks[0].stamps.get(*g) == fresh), "todos os grupos");
         assert_eq!(s.tag_stamps["casa"], fresh);
+        assert!(s.synced_once);
+        assert_eq!(s.reference(&uid).unwrap().notes, "anotação sincronizada", "a base de antes continua");
         s.save();
         assert_eq!(s.tasks[0].stamps.latest(), fresh, "gravar depois não recarimba");
-        // O arquivo tinha excluído e renomeado a tarefa depois do backup: a restaurada vence os dois.
-        let mut gone = crate::sync::SyncTask { uid: uid.clone(), title: "Renomeada".into(), ..Default::default() };
+        // O arquivo tinha excluído a tarefa, renomeado e anotado nela depois do backup: a restaurada vence a
+        // lápide e o título, mas as anotações feitas no outro aparelho são combinadas, não apagadas.
+        let mut gone = crate::sync::SyncTask { uid: uid.clone(), title: "Renomeada".into(), notes: "anotação sincronizada e mais".into(), ..Default::default() };
         gone.stamps.set(Group::Title, old + 600_000);
+        gone.stamps.set(Group::Notes, old + 600_000);
         let remote = crate::sync::SyncFile {
             schema: crate::sync::SCHEMA,
             tasks: vec![gone],
@@ -955,6 +972,7 @@ mod tests {
         let out = crate::sync::merge(&mut s, Some(&remote), "t", Utc::now().timestamp_millis());
         assert_eq!(s.tasks.len(), 1);
         assert_eq!(s.tasks[0].title, "Antiga");
+        assert_eq!(s.tasks[0].notes, format!("anotação do backup\n\n{}\nanotação sincronizada e mais", crate::sync::OTHER_VERSION_MARK));
         assert!(out.file.deleted.is_empty());
     }
 
