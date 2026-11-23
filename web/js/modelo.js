@@ -33,6 +33,7 @@ export function novaTarefa(id, titulo, data = null) {
     every: 1,
     anchor_day: data ? partes(data).d : 0,
     repeat_times: null,
+    stamps: carimbosCompletos(), // o armazém carimba na primeira gravação
   };
 }
 
@@ -44,7 +45,7 @@ export function normalizar(t) {
   t.done = Boolean(t.done);
   t.subtasks = Array.isArray(t.subtasks) ? t.subtasks : [];
   t.date ??= null;
-  t.time ??= null;
+  t.time = typeof t.time === "string" ? (/^\d\d:\d\d$/.test(t.time) ? `${t.time}:00` : t.time) : null; // sempre HH:MM:SS
   t.notify ??= null;
   t.notify_day_before = Boolean(t.notify_day_before);
   t.tags = Array.isArray(t.tags) ? t.tags : [];
@@ -53,7 +54,19 @@ export function normalizar(t) {
   t.every = Number.isFinite(t.every) && t.every >= 1 ? Math.floor(t.every) : 1;
   t.anchor_day ??= 0;
   t.repeat_times ??= null;
+  t.subtasks = t.subtasks.map((s) => ({ ...s, title: String(s?.title ?? ""), done: Boolean(s?.done) }));
+  t.stamps = carimbosCompletos(t.stamps);
   return t;
+}
+
+/** Os grupos de campos que a sincronização mescla cada um por conta própria (docs/sincronizacao.md). */
+export const GRUPOS_SYNC = ["title", "notes", "state", "notify", "tags", "color", "subtasks"];
+
+/** Carimbos de uma tarefa com todos os grupos presentes (o que falta vale 0: "nunca mudou"). */
+export function carimbosCompletos(c) {
+  const saida = {};
+  for (const g of GRUPOS_SYNC) saida[g] = Number.isFinite(c?.[g]) ? Math.trunc(c[g]) : 0;
+  return saida;
 }
 
 /** Cores de partida das tags (as mesmas do desktop, escolhidas pelo nome). */

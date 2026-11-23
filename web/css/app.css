@@ -138,6 +138,19 @@ p {
   position: relative;
 }
 
+/* Aviso fixo (não some sozinho): as tarefas não estão sendo guardadas neste aparelho. */
+.faixa-aviso {
+  flex: none;
+  margin: 0 12px 8px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: rgba(210, 60, 60, 0.16);
+  border: 1px solid rgba(210, 60, 60, 0.5);
+  color: var(--vermelho-texto);
+  font-size: 14px;
+  line-height: 1.35;
+}
+
 .tela {
   position: absolute;
   inset: 0;

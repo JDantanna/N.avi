@@ -91,8 +91,11 @@ function iniciar() {
     h("div", { class: "marca-app" }, fada(30), h("span", {}, "N.avi")),
     h("button", { class: "botao-icone", "aria-label": "Ajustes e dados", onclick: () => abrirAjustes(ctx) }, icone("ajustes", 22)),
   );
+  // Se o aparelho não deixa guardar (sem espaço, aba privada), o que se edita só existe na memória: avisa e não some.
+  const faixa = h("div", { class: "faixa-aviso", role: "alert", hidden: "" }, "Não consegui guardar suas tarefas neste aparelho (sem espaço ou aba privada). Elas só existem enquanto o app estiver aberto: exporte uma cópia em Ajustes.");
   document.getElementById("app").replaceChildren(
     topo,
+    faixa,
     telas,
     h("nav", { class: "abas", "aria-label": "Seções" }, botoesAba),
     h("div", { id: "folhas" }),
@@ -115,6 +118,8 @@ function iniciar() {
   // Toda mudança nos dados redesenha a tela. A folha de detalhes só se refaz quando a mudança veio de fora dela
   // (desfazer, concluir pela lista, importar), para não tirar o cursor de quem está digitando.
   armazem.aoMudar((origem) => {
+    faixa.hidden = !armazem.falhou;
+    if (origem === "gravacao") return;
     desenhar();
     if (detalheAberto && origem !== "detalhe") {
       if (armazem.porId(detalheAberto.id)) detalheAberto.montar();
@@ -145,6 +150,9 @@ function iniciar() {
   });
 
   desenhar();
+  // O iOS pode apagar os dados de um site que fica semanas sem uso; pedir armazenamento persistente reduz o risco
+  // (o Safari decide, e quase sempre concede a um app instalado na tela de início). A nuvem é a cópia de verdade.
+  navigator.storage?.persist?.().catch(() => {});
   return ctx;
 }
 
