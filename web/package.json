@@ -1,1 +1,9 @@
-{"type":"module"}
+{
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/logica.test.mjs",
+    "conferir": "node tools/conferir.mjs",
+    "servir": "node tools/servir.mjs 8123"
+  }
+}

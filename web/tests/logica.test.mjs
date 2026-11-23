@@ -1,5 +1,5 @@
 // Testes da lógica do app web: datas, recorrência (com os vetores compartilhados com o desktop), entrada rápida,
-// listas e armazenamento. Rodam com `node --test web/tests`, sem instalar nada.
+// listas e armazenamento. Rodam com `node --test web/tests/logica.test.mjs`, sem instalar nada.
 
 import test from "node:test";
 import assert from "node:assert/strict";

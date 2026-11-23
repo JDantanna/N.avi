@@ -28,7 +28,8 @@ jobs:
         with:
           node-version: 22
       - name: Testes da lógica (recorrência, entrada rápida, armazém)
-        run: node --test web/tests
+        # Arquivo explícito: nas versões novas do Node, um nome de pasta não é varrido pelo --test.
+        run: node --test web/tests/logica.test.mjs
       - name: Confere que o site e o service worker listam os mesmos arquivos
         run: node web/tools/conferir.mjs
 
